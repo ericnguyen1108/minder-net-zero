@@ -22,7 +22,9 @@ Minder Net Zero is a guided application-review workspace for competition organis
 
 ## Current phase
 
-Phases 1 and 2 are implemented. The app now includes the eight-step organiser journey plus a plain-language Decision Guide builder for eligibility, elimination, scoring criteria, weights, score anchors, recommendation thresholds, tie-break priorities, missing-information safeguards, validation, human approval, and immutable approved versions. Drafts remain device-local until secure shared persistence is added in a later phase.
+Phases 1–3 are implemented. The app now includes the eight-step organiser journey, an approved and versioned Decision Guide, and a guided historical-data importer for Excel, CSV and TSV files. Organisers confirm column and outcome mappings, review missing, duplicate and linked records, and create one fixed, outcome-balanced split with approximately 80% for teaching and 20% for a blind practice check.
+
+Historical application text is kept out of `localStorage` and stored in separate teaching and sealed-test IndexedDB stores. The active dataset pointer is committed with the records, and an integrity check fails closed if stored content or assignments change. Phase 4 can read only verified teaching records. This remains a browser-only prototype: it does not send data to AI, but it is not a production secure workspace and must not be used with real candidate data until authentication and managed storage are added. This release expects applications and final outcomes in the same spreadsheet.
 
 ## Local development
 

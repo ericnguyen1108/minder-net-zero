@@ -1,0 +1,271 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  createSealedHistoricalDataset,
+  deleteHistoricalDataset,
+  historicalDatasetExists,
+  loadActiveHistoricalSummary,
+  loadTeachingRows,
+  prepareHistoricalDataset,
+  saveHistoricalDataset,
+  sanitizeHistoricalImportSummary,
+} from "../app/historical-data.ts";
+import { buildSourceTable, parseDelimitedText } from "../app/historical-parser.ts";
+import { IDBKeyRange, indexedDB } from "fake-indexeddb";
+
+globalThis.indexedDB = indexedDB;
+globalThis.IDBKeyRange = IDBKeyRange;
+
+const columns = [
+  { key: "id", label: "Application ID", index: 0 },
+  { key: "team", label: "Team", index: 1 },
+  { key: "problem", label: "Problem", index: 2 },
+  { key: "solution", label: "Solution", index: 3 },
+  { key: "outcome", label: "Final result", index: 4 },
+  { key: "year", label: "Year", index: 5 },
+];
+
+const mapping = {
+  applicationId: "id",
+  teamName: "team",
+  responseColumns: ["problem", "solution"],
+  outcome: "outcome",
+  year: "year",
+  track: "",
+  judgeScore: "",
+  reviewerNotes: "",
+};
+
+const outcomeMapping = {
+  shortlisted: "progressed",
+  "not selected": "not_progressed",
+  withdrawn: "ignore",
+};
+
+function makeRows(progressed = 30, notProgressed = 30) {
+  return Array.from({ length: progressed + notProgressed }, (_, index) => ({
+    id: `APP-${String(index + 1).padStart(4, "0")}`,
+    team: `Team ${index + 1}`,
+    problem: `Problem statement ${index + 1} explains the material climate challenge in sufficient detail.`,
+    solution: `Solution ${index + 1} explains the proposed intervention, evidence and delivery plan in sufficient detail.`,
+    outcome: index < progressed ? "Shortlisted" : "Not selected",
+    year: "2025",
+  }));
+}
+
+function makeTable(rows) {
+  return {
+    sheetName: "Applications",
+    columns,
+    rows,
+    rowNumbers: rows.map((_, index) => index + 2),
+  };
+}
+
+test("parses BOM, quoted commas, multiline CSV, TSV and preserves row numbers across blanks", () => {
+  const csv =
+    '\uFEFFID,Team,Answer,Outcome\r\n0012,"Team, One","Line one\nLine two",Shortlisted\r\n\r\n0013,Team Two,Answer two,Not selected\r\n';
+  const csvTable = buildSourceTable("CSV", parseDelimitedText(csv));
+  assert.equal(csvTable.rows.length, 2);
+  assert.equal(csvTable.rows[0][csvTable.columns[0].key], "0012");
+  assert.equal(csvTable.rows[0][csvTable.columns[2].key], "Line one\nLine two");
+  assert.deepEqual(csvTable.rowNumbers, [2, 4]);
+
+  const tsvTable = buildSourceTable(
+    "TSV",
+    parseDelimitedText("ID\tTeam\tAnswer\tOutcome\n0007\tTeam Seven\tAnswer\tShortlisted\n"),
+  );
+  assert.equal(tsvTable.rows[0][tsvTable.columns[0].key], "0007");
+});
+
+test("keeps question headings, preserves leading-zero IDs and never guesses outcomes", () => {
+  const rows = makeRows(10, 10);
+  rows[0].id = "0012";
+  rows.push({
+    id: "0099",
+    team: "Unknown decision team",
+    problem: "A sufficiently detailed problem statement that must remain intact for later evidence checking.",
+    solution: "A sufficiently detailed solution statement that must remain intact for later evidence checking.",
+    outcome: "Maybe",
+    year: "2025",
+  });
+  const prepared = prepareHistoricalDataset(makeTable(rows), mapping, outcomeMapping);
+
+  assert.equal(prepared.rows[0].externalId, "0012");
+  assert.deepEqual(prepared.rows[0].answers.map((answer) => answer.heading), ["Problem", "Solution"]);
+  assert.match(prepared.rows[0].applicationText, /^Problem\n/);
+  assert.equal(prepared.rows.at(-1).outcome, null);
+  assert.ok(prepared.rows.at(-1).issues.includes("unmapped-outcome"));
+  assert.equal(prepared.totalRows, prepared.validRows.length + prepared.excludedRows);
+});
+
+test("shows missing, ignored, exact duplicate and conflicting records as excluded", () => {
+  const rows = makeRows(12, 12);
+  rows.push({ ...rows[0] });
+  rows.push({ ...rows[1], id: "NEW-ID" });
+  rows.push({ ...rows[2], solution: "Different text", outcome: "Not selected" });
+  rows.push({ ...rows[3], id: "BLANK-TEXT", problem: "", solution: "" });
+  rows.push({ ...rows[4], id: "WITHDRAWN", outcome: "Withdrawn" });
+  const prepared = prepareHistoricalDataset(makeTable(rows), mapping, outcomeMapping);
+
+  assert.equal(prepared.excludedRows, 6);
+  assert.equal(prepared.duplicateRows, 4);
+  assert.ok((prepared.issueCounts["conflicting-id"] ?? 0) >= 2);
+  assert.ok((prepared.issueCounts["missing-text"] ?? 0) >= 1);
+  assert.ok((prepared.issueCounts["ignored-outcome"] ?? 0) >= 1);
+  assert.equal(prepared.totalRows, prepared.validRows.length + prepared.excludedRows);
+});
+
+test("creates one exact, deterministic and outcome-balanced 80/20 blind split", async () => {
+  const table = makeTable(makeRows());
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  assert.equal(prepared.canSeal, true);
+
+  const common = {
+    fileName: "history.xlsx",
+    fileSize: 12000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  };
+  const first = await createSealedHistoricalDataset({ ...common, datasetId: "history-one" });
+  const reversedTable = makeTable([...table.rows].reverse());
+  const reversedPrepared = prepareHistoricalDataset(reversedTable, mapping, outcomeMapping);
+  const second = await createSealedHistoricalDataset({
+    ...common,
+    datasetId: "history-two",
+    table: reversedTable,
+    prepared: reversedPrepared,
+  });
+
+  assert.equal(first.sealedRows.length, 12);
+  assert.equal(first.teachingRows.length, 48);
+  assert.ok(first.sealedRows.some((row) => row.outcome === "progressed"));
+  assert.ok(first.sealedRows.some((row) => row.outcome === "not_progressed"));
+  const assignments = (dataset) =>
+    Object.fromEntries(
+      [...dataset.teachingRows, ...dataset.sealedRows]
+        .map((row) => [row.externalId, row.partition])
+        .sort(([a], [b]) => a.localeCompare(b)),
+    );
+  assert.deepEqual(assignments(first), assignments(second));
+  assert.equal(first.metadata.split.algorithm, "linked-outcome-sha256-v2");
+  assert.equal(first.metadata.split.status, "sealed");
+});
+
+test("scopes reused IDs by year and keeps linked team-year applications in one partition", async () => {
+  const rows = makeRows(15, 15);
+  rows[1].id = rows[0].id;
+  rows[1].year = "2024";
+  rows[0].team = "Linked team";
+  rows[1].team = "Linked team";
+  rows[0].year = "2025";
+  rows[2].team = "Same-year linked team";
+  rows[3].team = "Same-year linked team";
+  rows[2].year = "2025";
+  rows[3].year = "2025";
+  const table = makeTable(rows);
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  assert.equal(prepared.issueCounts["conflicting-id"] ?? 0, 0);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "linked-history",
+    fileName: "linked.csv",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  const partitions = Object.fromEntries(
+    [...dataset.teachingRows, ...dataset.sealedRows].map((row) => [row.externalId, row.partition]),
+  );
+  assert.equal(partitions[rows[2].id], partitions[rows[3].id]);
+});
+
+test("splits 1,000 balanced examples into exactly 800 teaching and 200 sealed rows", async () => {
+  const table = makeTable(makeRows(500, 500));
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "history-1000",
+    fileName: "history-1000.csv",
+    fileSize: 250000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  assert.equal(dataset.teachingRows.length, 800);
+  assert.equal(dataset.sealedRows.length, 200);
+});
+
+test("atomically stores an active pointer, verifies integrity and exposes teaching rows only", async () => {
+  const table = makeTable(makeRows(15, 15));
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "stored-history",
+    fileName: "stored.xlsx",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  await saveHistoricalDataset(dataset);
+  assert.equal(await historicalDatasetExists(dataset.metadata.id), true);
+  assert.equal((await loadActiveHistoricalSummary()).datasetId, dataset.metadata.id);
+  const teaching = await loadTeachingRows(dataset.metadata.id);
+  assert.equal(teaching.length, dataset.teachingRows.length);
+  assert.ok(teaching.every((row) => !("reviewerNotes" in row) && !("externalId" in row)));
+  assert.ok(teaching.every((row) => !dataset.sealedRows.some((sealed) => sealed.rowId === row.rowId)));
+
+  await deleteHistoricalDataset(dataset.metadata.id);
+  assert.equal(await loadActiveHistoricalSummary(), null);
+});
+
+test("fails closed when stored assignments are changed without a new integrity seal", async () => {
+  const table = makeTable(makeRows(15, 15));
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "tampered-history",
+    fileName: "tampered.csv",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  await saveHistoricalDataset(dataset);
+  const database = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("minder-net-zero-private-v1", 2);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const transaction = database.transaction("historical-teaching", "readwrite");
+  const store = transaction.objectStore("historical-teaching");
+  const row = dataset.teachingRows[0];
+  store.put({ ...row, partition: "sealed_test" });
+  await new Promise((resolve, reject) => {
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+  database.close();
+
+  assert.equal(await historicalDatasetExists(dataset.metadata.id), false);
+  await assert.rejects(loadTeachingRows(dataset.metadata.id), /integrity check/i);
+  await deleteHistoricalDataset(dataset.metadata.id);
+});
+
+test("requires enough positive and negative examples and distrusts missing storage summaries", () => {
+  const tooSmall = prepareHistoricalDataset(makeTable(makeRows(4, 16)), mapping, outcomeMapping);
+  assert.equal(tooSmall.canSeal, false);
+  assert.match(tooSmall.sealBlockers.join(" "), /5 progressed/i);
+
+  const recovered = sanitizeHistoricalImportSummary({ status: "ready", datasetId: "" });
+  assert.equal(recovered.status, "missing");
+});

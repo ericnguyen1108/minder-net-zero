@@ -40,9 +40,12 @@ test("server-renders the Minder Net Zero setup experience", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
-test("removes starter assets and keeps the Phase 1 safety language", async () => {
-  const [page, layout, packageJson] = await Promise.all([
+test("removes starter assets and keeps the safety language", async () => {
+  const [page, historyImport, historyData, historyParser, layout, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/historical-import.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/historical-data.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/historical-parser.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
@@ -55,6 +58,13 @@ test("removes starter assets and keeps the Phase 1 safety language", async () =>
   assert.match(page, /A person confirms every outcome/);
   assert.match(page, /rules: \[\]/);
   assert.doesNotMatch(page, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
+  assert.match(historyImport, /No AI in this step/);
+  assert.match(historyImport, /not uploaded or sent to AI/);
+  assert.match(historyData, /historical-teaching/);
+  assert.match(historyData, /historical-sealed/);
+  assert.match(historyData, /historical-active/);
+  assert.match(historyData, /did not pass its integrity check/);
+  assert.doesNotMatch(`${historyImport}\n${historyData}\n${historyParser}`, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
   assert.match(layout, /fair, evidence-backed application review/i);
   assert.doesNotMatch(packageJson, /react-loading-skeleton|site-creator-vinext-starter/);
 
@@ -64,7 +74,7 @@ test("removes starter assets and keeps the Phase 1 safety language", async () =>
   await access(root);
 });
 
-test("keeps later assessment capabilities locked in Phase 2", async () => {
+test("keeps later assessment capabilities locked in Phase 3", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   assert.match(page, /type="button" disabled>[\s\S]{0,120}>02<\/span>Applications/);
@@ -72,4 +82,7 @@ test("keeps later assessment capabilities locked in Phase 2", async () => {
   assert.match(page, /type="button" disabled>[\s\S]{0,120}>04<\/span>Results/);
   assert.match(page, /Minder can only recommend that the application does not progress/);
   assert.match(page, /Missing or conflicting evidence always goes to Human Review/);
+  assert.match(page, /type ActiveView = "overview" \| "details" \| "guide" \| "history"/);
+  assert.match(page, /step\.number === 3 && guideApproved/);
+  assert.match(page, /historyStorageState === "verified"/);
 });
