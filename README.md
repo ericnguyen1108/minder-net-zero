@@ -22,9 +22,17 @@ Minder Net Zero is a guided application-review workspace for competition organis
 
 ## Current phase
 
-Phases 1–3 are implemented. The app now includes the eight-step organiser journey, an approved and versioned Decision Guide, and a guided historical-data importer for Excel, CSV and TSV files. Organisers confirm column and outcome mappings, review missing, duplicate and linked records, and create one fixed, outcome-balanced split with approximately 80% for teaching and 20% for a blind practice check.
+Phases 1–4 are implemented. The app now includes the eight-step organiser journey, an approved and versioned Decision Guide, a guided historical-data importer, organiser-reviewed teaching patterns, and a one-use blind practice test.
 
-Historical application text is kept out of `localStorage` and stored in separate teaching and sealed-test IndexedDB stores. The active dataset pointer is committed with the records, and an integrity check fails closed if stored content or assignments change. Phase 4 can read only verified teaching records. This remains a browser-only prototype: it does not send data to AI, but it is not a production secure workspace and must not be used with real candidate data until authentication and managed storage are added. This release expects applications and final outcomes in the same spreadsheet.
+Historical application text is kept out of `localStorage` and stored in separate teaching and sealed-test IndexedDB stores. Phase 4 sends only allow-listed pseudonymous row IDs and mapped answers through a server gateway. Separate identity columns are excluded, but names or contact details embedded inside an answer are not automatically redacted. Teaching requests may include historical outcomes; blind practice requests never include them. Every AI result uses a strict output schema, and every quotation is rechecked against the exact current answer before the app calculates a weighted score locally. Because exact text can still be irrelevant, an organiser must also approve a fixed human evidence sample before the run can pass.
+
+Sealed outcomes are unavailable until a complete prediction set is durably committed. Revealing them creates a minimal, permanent browser receipt keyed by the historical-set fingerprint, so deleting and re-importing the same file cannot make it blind again. State changes are monotonic and revision-checked to stop stale tabs or unsafe reversals.
+
+This remains a test-data-only prototype. It has no shared managed candidate database, roles or production audit service yet. Do not use real candidate data until those controls are added. Passing Phase 4 means only that an organiser may consider a supervised pilot; it does not enable live assessment or autonomous decisions.
+
+## Managed AI connection
+
+The organiser interface never asks for an API key. A Minder administrator provisions `OPENAI_API_KEY` as a server-side deployment secret and may optionally pin `OPENAI_MODEL`. Without that secret, Phase 4 fails closed and accurately reports that no application text has been sent. The app uses the OpenAI Responses API with structured outputs and `store: false`; retention still depends on the organisation’s OpenAI project and data-control settings.
 
 ## Local development
 

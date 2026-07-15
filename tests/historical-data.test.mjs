@@ -1,15 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as historicalData from "../app/historical-data.ts";
 import {
   createSealedHistoricalDataset,
   deleteHistoricalDataset,
   historicalDatasetExists,
   loadActiveHistoricalSummary,
+  loadBlindPracticeRows,
+  loadHistoricalDatasetBinding,
   loadTeachingRows,
   prepareHistoricalDataset,
   saveHistoricalDataset,
   sanitizeHistoricalImportSummary,
 } from "../app/historical-data.ts";
+import {
+  createPhase4Session,
+  contentHash,
+  loadPhase4Session,
+  revealCommittedOutcomes,
+  savePhase4Session,
+} from "../app/phase4-storage.ts";
 import { buildSourceTable, parseDelimitedText } from "../app/historical-parser.ts";
 import { IDBKeyRange, indexedDB } from "fake-indexeddb";
 
@@ -242,7 +252,7 @@ test("fails closed when stored assignments are changed without a new integrity s
   });
   await saveHistoricalDataset(dataset);
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 2);
+    const request = indexedDB.open("minder-net-zero-private-v1", 4);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -259,6 +269,175 @@ test("fails closed when stored assignments are changed without a new integrity s
   assert.equal(await historicalDatasetExists(dataset.metadata.id), false);
   await assert.rejects(loadTeachingRows(dataset.metadata.id), /integrity check/i);
   await deleteHistoricalDataset(dataset.metadata.id);
+});
+
+test("keeps sealed outcomes hidden until a complete prediction set is committed", async () => {
+  const table = makeTable(makeRows(15, 15));
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "phase4-blind-history",
+    fileName: "phase4.csv",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  await saveHistoricalDataset(dataset);
+
+  const blind = await loadBlindPracticeRows(dataset.metadata.id);
+  assert.equal(blind.length, dataset.sealedRows.length);
+  assert.ok(
+    blind.every(
+      (row) =>
+        !Object.hasOwn(row, "outcome") &&
+        !Object.hasOwn(row, "teamName") &&
+        !Object.hasOwn(row, "reviewerNotes") &&
+        !Object.hasOwn(row, "judgeScore"),
+    ),
+  );
+  assert.equal("loadCompleteSealedOutcomeKey" in historicalData, false);
+
+  const binding = await loadHistoricalDatasetBinding(dataset.metadata.id);
+  let session = await createPhase4Session({ binding, guideContentHash: "guide-hash" });
+  await assert.rejects(
+    savePhase4Session({ ...session, patternStatus: "generating" }),
+    /unsafe reversal/i,
+  );
+  session = await savePhase4Session(session);
+  const assessments = blind.map((row) => ({
+    rowId: row.rowId,
+    eligibility: [],
+    elimination: [],
+    criteria: [],
+    weightedScore: null,
+    recommendation: "human_review",
+    evidenceValid: false,
+    humanReviewReasons: ["Explicit test abstention"],
+  }));
+  session = await savePhase4Session({
+    ...session,
+    modelId: "test-model",
+    patternStatus: "generating",
+    patternProcessedRows: binding.teachingRows,
+    patternProgress: 100,
+  });
+  session = await savePhase4Session({ ...session, patternStatus: "reviewing" });
+  session = await savePhase4Session({
+    ...session,
+    patternStatus: "approved",
+    teachingApprovedAt: new Date().toISOString(),
+    teachingApprovedBy: "Test organiser",
+  });
+  session = await savePhase4Session({
+    ...session,
+    practiceStatus: "policy_locked",
+    acceptancePolicy: {
+      evaluationMode: "binary_alignment",
+      minimumHistoricalAlignment: 80,
+      minimumProgressedCapture: 100,
+      maximumHumanReviewRate: 30,
+      waitlistPolicy: "exclude",
+      tieBreakPriority: [],
+      lockedAt: new Date().toISOString(),
+      lockedBy: "Test organiser",
+    },
+  });
+  session = await savePhase4Session({ ...session, practiceStatus: "running" });
+  session = await savePhase4Session({
+    ...session,
+    assessments,
+  });
+  session = await savePhase4Session({
+    ...session,
+    practiceStatus: "predictions_committed",
+    predictionHash: await contentHash(assessments),
+  });
+  assert.equal((await loadPhase4Session(dataset.metadata.id, 1)).outcomes, null);
+
+  await assert.rejects(
+    savePhase4Session({
+      ...session,
+      practiceStatus: "revealed",
+      outcomes: dataset.sealedRows.map((row) => ({ rowId: row.rowId, outcome: row.outcome })),
+      revealedAt: new Date().toISOString(),
+    }),
+    /one-use seal|unsafe reversal/i,
+  );
+
+  const revealed = await revealCommittedOutcomes(session);
+  assert.equal(revealed.practiceStatus, "revealed");
+  assert.equal(revealed.outcomes.length, blind.length);
+  const receiptDatabase = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("minder-net-zero-private-v1", 4);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const consumedReceipt = await new Promise((resolve, reject) => {
+    const request = receiptDatabase
+      .transaction("phase4-consumed", "readonly")
+      .objectStore("phase4-consumed")
+      .get(dataset.metadata.datasetFingerprint);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  receiptDatabase.close();
+  assert.deepEqual(Object.keys(consumedReceipt).sort(), [
+    "datasetFingerprint",
+    "revealedAt",
+    "sessionId",
+  ]);
+  const revealedAgain = await revealCommittedOutcomes(revealed);
+  assert.equal(revealedAgain.revealedAt, revealed.revealedAt);
+  assert.deepEqual(revealedAgain.outcomes, revealed.outcomes);
+
+  await assert.rejects(
+    savePhase4Session({
+      ...revealed,
+      practiceStatus: "predictions_committed",
+      outcomes: null,
+      revealedAt: null,
+    }),
+    /unsafe reversal/i,
+  );
+
+  const tampered = {
+    ...revealed,
+    practiceStatus: "predictions_committed",
+    outcomes: null,
+    revealedAt: null,
+    metrics: null,
+    assessments: revealed.assessments.map((assessment, index) =>
+      index === 0 ? { ...assessment, recommendation: "progressed" } : assessment,
+    ),
+  };
+  await assert.rejects(savePhase4Session(tampered), /changed historical data/i);
+
+  await deleteHistoricalDataset(dataset.metadata.id);
+  await assert.rejects(loadPhase4Session(dataset.metadata.id, 1), /integrity check/i);
+
+  const reimported = await createSealedHistoricalDataset({
+    datasetId: "phase4-blind-reimport",
+    fileName: "phase4-reimport.csv",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  assert.equal(reimported.metadata.datasetFingerprint, dataset.metadata.datasetFingerprint);
+  await saveHistoricalDataset(reimported);
+  const reimportedBinding = await loadHistoricalDatasetBinding(reimported.metadata.id);
+  await assert.rejects(
+    createPhase4Session({
+      binding: reimportedBinding,
+      guideContentHash: "guide-hash",
+    }),
+    /already been used for a revealed blind test/i,
+  );
+  await deleteHistoricalDataset(reimported.metadata.id);
 });
 
 test("requires enough positive and negative examples and distrusts missing storage summaries", () => {

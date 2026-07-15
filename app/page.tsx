@@ -3,16 +3,26 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { HistoricalImportBuilder } from "./historical-import";
+import { Phase4Workspace } from "./phase4";
 import {
   EMPTY_HISTORICAL_IMPORT,
   loadActiveHistoricalSummary,
   sanitizeHistoricalImportSummary,
 } from "./historical-data";
 import type { HistoricalImportSummary } from "./historical-data";
+import {
+  EMPTY_PHASE4_SUMMARY,
+  loadPhase4Session,
+  phase4SummaryFromSession,
+  sanitizePhase4Summary,
+} from "./phase4-storage";
+import type { Phase4Summary } from "./phase4-storage";
+import { createPhase4InputFingerprint } from "./phase4-logic";
 
 const LEGACY_STORAGE_KEY = "minder-net-zero-phase-1";
 const V2_STORAGE_KEY = "minder-net-zero-app-v2";
-const STORAGE_KEY = "minder-net-zero-app-v3";
+const V3_STORAGE_KEY = "minder-net-zero-app-v3";
+const STORAGE_KEY = "minder-net-zero-app-v4";
 
 type CompetitionDetails = {
   competitionName: string;
@@ -69,14 +79,15 @@ type ApprovedSnapshot = {
 };
 
 type StoredState = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   details: CompetitionDetails;
   guide: DecisionGuide;
   approvedVersions: ApprovedSnapshot[];
   historicalImport: HistoricalImportSummary;
+  phase4: Phase4Summary;
 };
 
-type ActiveView = "overview" | "details" | "guide" | "history";
+type ActiveView = "overview" | "details" | "guide" | "history" | "learning";
 type GuideSection = "entry" | "scoring" | "recommendation" | "approval";
 
 type RuleEditorState = {
@@ -346,11 +357,12 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
   if (typeof window === "undefined") {
     return {
       state: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         details: DEFAULT_DETAILS,
         guide: createEmptyGuide(),
         approvedVersions: [],
         historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
+        phase4: { ...EMPTY_PHASE4_SUMMARY },
       },
       recovered: false,
     };
@@ -363,16 +375,38 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(parsed.details);
       return {
         state: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           details,
           guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
           approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
           historicalImport: sanitizeHistoricalImportSummary(parsed.historicalImport),
+          phase4: sanitizePhase4Summary(parsed.phase4),
         },
         recovered: false,
       };
     } catch {
       // Fall through to the earlier safe draft instead of inventing replacement content.
+    }
+  }
+
+  const phaseThree = window.localStorage.getItem(V3_STORAGE_KEY);
+  if (phaseThree) {
+    try {
+      const parsed = JSON.parse(phaseThree) as Partial<StoredState>;
+      const details = sanitizeDetails(parsed.details);
+      return {
+        state: {
+          schemaVersion: 4,
+          details,
+          guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
+          approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
+          historicalImport: sanitizeHistoricalImportSummary(parsed.historicalImport),
+          phase4: { ...EMPTY_PHASE4_SUMMARY },
+        },
+        recovered: Boolean(current),
+      };
+    } catch {
+      // Continue to the earlier Decision Guide draft if it is still available.
     }
   }
 
@@ -383,13 +417,14 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(parsed.details);
       return {
         state: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           details,
           guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
           approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
           historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
+          phase4: { ...EMPTY_PHASE4_SUMMARY },
         },
-        recovered: Boolean(current),
+        recovered: Boolean(current || phaseThree),
       };
     } catch {
       // Continue to the Phase 1 setup details if they are still available.
@@ -402,13 +437,14 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(JSON.parse(legacy));
       return {
         state: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           details,
           guide: createEmptyGuide(details.shortlistTarget),
           approvedVersions: [],
           historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
+          phase4: { ...EMPTY_PHASE4_SUMMARY },
         },
-        recovered: Boolean(current || phaseTwo),
+        recovered: Boolean(current || phaseThree || phaseTwo),
       };
     } catch {
       // Use a blank guide and clearly tell the user that recovery was needed.
@@ -417,13 +453,14 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
 
   return {
     state: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       details: DEFAULT_DETAILS,
       guide: createEmptyGuide(),
       approvedVersions: [],
       historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
+      phase4: { ...EMPTY_PHASE4_SUMMARY },
     },
-    recovered: Boolean(current || phaseTwo || legacy),
+    recovered: Boolean(current || phaseThree || phaseTwo || legacy),
   };
 }
 
@@ -567,6 +604,8 @@ export default function Home() {
   const [historicalImport, setHistoricalImport] = useState<HistoricalImportSummary>({
     ...EMPTY_HISTORICAL_IMPORT,
   });
+  const [phase4, setPhase4] = useState<Phase4Summary>({ ...EMPTY_PHASE4_SUMMARY });
+  const [phase4Start, setPhase4Start] = useState<"teach" | "test">("teach");
   const [historyStorageState, setHistoryStorageState] = useState<
     "unverified" | "verifying" | "verified" | "unavailable"
   >("unverified");
@@ -584,15 +623,35 @@ export default function Home() {
     setGuide(loaded.state.guide);
     setApprovedVersions(loaded.state.approvedVersions);
     setHistoricalImport(loaded.state.historicalImport);
+    setPhase4(loaded.state.phase4);
     setSaveState(loaded.recovered ? "recovered" : "saved");
     setIsReady(true);
     setHistoryStorageState("verifying");
     void loadActiveHistoricalSummary()
-      .then((activeSummary) => {
+      .then(async (activeSummary) => {
         if (activeSummary) {
           setHistoricalImport(activeSummary);
+          if (
+            activeSummary.datasetId &&
+            loaded.state.guide.status === "approved" &&
+            activeSummary.guideVersion === loaded.state.guide.version
+          ) {
+            const storedPhase4 = await loadPhase4Session(
+              activeSummary.datasetId,
+              loaded.state.guide.version,
+            );
+            const currentGuideHash = await createPhase4InputFingerprint(loaded.state.guide);
+            setPhase4(
+              storedPhase4 && storedPhase4.guideContentHash === currentGuideHash
+                ? phase4SummaryFromSession(storedPhase4)
+                : { ...EMPTY_PHASE4_SUMMARY },
+            );
+          } else {
+            setPhase4({ ...EMPTY_PHASE4_SUMMARY });
+          }
         } else if (loaded.state.historicalImport.status === "ready") {
           setHistoricalImport((current) => ({ ...current, status: "missing" }));
+          setPhase4({ ...EMPTY_PHASE4_SUMMARY });
         }
         setHistoryStorageState("verified");
       })
@@ -600,6 +659,7 @@ export default function Home() {
         setHistoricalImport((current) =>
           current.status === "ready" ? { ...current, status: "missing" } : current,
         );
+        setPhase4({ ...EMPTY_PHASE4_SUMMARY });
         setHistoryStorageState("unavailable");
       });
   }, []);
@@ -607,11 +667,12 @@ export default function Home() {
   useEffect(() => {
     if (!isReady) return;
     const state: StoredState = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       details: savedDetails,
       guide,
       approvedVersions,
       historicalImport,
+      phase4,
     };
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -624,7 +685,7 @@ export default function Home() {
     } catch {
       setSaveState("error");
     }
-  }, [approvedVersions, guide, historicalImport, isReady, savedDetails]);
+  }, [approvedVersions, guide, historicalImport, isReady, phase4, savedDetails]);
 
   const detailsComplete = useMemo(
     () =>
@@ -644,8 +705,22 @@ export default function Home() {
     historyStorageState === "verified" &&
     historicalImport.status === "ready" &&
     Boolean(historicalImport.datasetId);
+  const phase4Matches =
+    historyReady &&
+    phase4.datasetId === historicalImport.datasetId &&
+    phase4.guideVersion === guide.version;
+  const teachingApproved =
+    phase4Matches &&
+    (phase4.status === "teaching_approved" ||
+      phase4.status === "practice_passed" ||
+      phase4.status === "practice_failed");
+  const practicePassed = phase4Matches && phase4.status === "practice_passed";
   const completedSteps =
-    (detailsComplete ? 1 : 0) + (guideApproved ? 1 : 0) + (historyReady ? 1 : 0);
+    (detailsComplete ? 1 : 0) +
+    (guideApproved ? 1 : 0) +
+    (historyReady ? 1 : 0) +
+    (teachingApproved ? 1 : 0) +
+    (practicePassed ? 1 : 0);
   const formComplete = Boolean(
     trimmed(details.competitionName) &&
       trimmed(details.organiserName) &&
@@ -702,8 +777,15 @@ export default function Home() {
     setActiveView("history");
   }
 
+  function openPhase4(start: "teach" | "test") {
+    if (!historyReady || (start === "test" && !teachingApproved)) return;
+    setPhase4Start(start);
+    setActiveView("learning");
+  }
+
   function updateHistoricalImport(summary: HistoricalImportSummary) {
     setHistoricalImport(summary);
+    if (summary.datasetId !== phase4.datasetId) setPhase4({ ...EMPTY_PHASE4_SUMMARY });
     setHistoryStorageState("verified");
   }
 
@@ -834,11 +916,16 @@ export default function Home() {
             detailsComplete={detailsComplete}
             guideApproved={guideApproved}
             historyReady={historyReady}
+            teachingApproved={teachingApproved}
+            practicePassed={practicePassed}
+            practiceFailed={phase4Matches && phase4.status === "practice_failed"}
             guideVersion={guide.version}
             isReady={isReady}
             onOpenDetails={() => setActiveView("details")}
             onOpenGuide={openGuide}
             onOpenHistory={openHistory}
+            onOpenTeach={() => openPhase4("teach")}
+            onOpenTest={() => openPhase4("test")}
           />
         ) : activeView === "details" ? (
           <CompetitionForm
@@ -863,14 +950,24 @@ export default function Home() {
             onDiscardRevision={discardRevision}
             onBack={() => setActiveView("overview")}
           />
-        ) : (
+        ) : activeView === "history" ? (
           <HistoricalImportBuilder
             summary={historicalImport}
             guideVersion={guide.version}
             onSummaryChange={updateHistoricalImport}
             onBack={() => setActiveView("overview")}
           />
-        )}
+        ) : historicalImport.datasetId ? (
+          <Phase4Workspace
+            key={`${historicalImport.datasetId}-${guide.version}-${phase4Start}`}
+            datasetId={historicalImport.datasetId}
+            guide={guide}
+            organiserName={savedDetails.organiserName}
+            initialStep={phase4Start}
+            onSummaryChange={setPhase4}
+            onBack={() => setActiveView("overview")}
+          />
+        ) : null}
       </main>
     </div>
   );
@@ -881,36 +978,56 @@ function Overview({
   detailsComplete,
   guideApproved,
   historyReady,
+  teachingApproved,
+  practicePassed,
+  practiceFailed,
   guideVersion,
   isReady,
   onOpenDetails,
   onOpenGuide,
   onOpenHistory,
+  onOpenTeach,
+  onOpenTest,
 }: {
   completedSteps: number;
   detailsComplete: boolean;
   guideApproved: boolean;
   historyReady: boolean;
+  teachingApproved: boolean;
+  practicePassed: boolean;
+  practiceFailed: boolean;
   guideVersion: number;
   isReady: boolean;
   onOpenDetails: () => void;
   onOpenGuide: () => void;
   onOpenHistory: () => void;
+  onOpenTeach: () => void;
+  onOpenTest: () => void;
 }) {
   const nextTitle = !detailsComplete
     ? "Add competition details"
     : !guideApproved
       ? "Build your decision guide"
-      : historyReady
-        ? "Historical decisions are ready"
-        : "Prepare historical decisions";
+      : !historyReady
+        ? "Prepare historical decisions"
+        : !teachingApproved
+          ? "Review teaching patterns"
+          : !practicePassed
+            ? practiceFailed
+              ? "Review the failed practice test"
+              : "Run the blind practice test"
+            : "Phase 4 is approved";
   const nextBody = !detailsComplete
     ? "Tell Minder who owns this competition and how many teams you plan to shortlist."
     : !guideApproved
       ? "Define the official rules Minder must follow before any historical patterns are considered."
-      : historyReady
-        ? "The sealed teaching and practice-test sets are stored separately. Step 4 remains locked in this phase."
-        : `Decision Guide Version ${guideVersion} is approved. Historical data comes next.`;
+      : !historyReady
+        ? `Decision Guide Version ${guideVersion} is approved. Historical data comes next.`
+        : !teachingApproved
+          ? "Minder can now look for possible patterns in the teaching set. Every pattern needs your decision."
+          : !practicePassed
+            ? "Lock your pass rules before Minder assesses the sealed set. Past outcomes stay hidden until every recommendation is committed."
+            : "Teaching guidance and the blind practice result are approved. Live assessment remains off until safeguards are confirmed in Phase 5.";
 
   return (
     <div className="content-grid">
@@ -937,14 +1054,28 @@ function Overview({
                   ? guideApproved
                   : step.number === 3
                     ? historyReady
-                    : false;
+                    : step.number === 4
+                      ? teachingApproved
+                      : step.number === 5
+                        ? practicePassed
+                        : false;
             const available =
               step.number === 1 ||
               (step.number === 2 && detailsComplete) ||
-              (step.number === 3 && guideApproved);
-            const readyNext = step.number === 4 && historyReady;
+              (step.number === 3 && guideApproved) ||
+              (step.number === 4 && historyReady) ||
+              (step.number === 5 && teachingApproved);
+            const readyNext = step.number === 6 && practicePassed;
             const action =
-              step.number === 1 ? onOpenDetails : step.number === 2 ? onOpenGuide : onOpenHistory;
+              step.number === 1
+                ? onOpenDetails
+                : step.number === 2
+                  ? onOpenGuide
+                  : step.number === 3
+                    ? onOpenHistory
+                    : step.number === 4
+                      ? onOpenTeach
+                      : onOpenTest;
             return (
               <article
                 className={`step-card ${available ? "step-available" : "step-locked"} ${complete ? "step-complete" : ""} ${readyNext ? "step-ready-next" : ""}`}
@@ -964,6 +1095,10 @@ function Overview({
                           ? `Review Version ${guideVersion}`
                           : step.number === 3
                             ? "Review import"
+                            : step.number === 4
+                              ? "Review teaching"
+                              : step.number === 5
+                                ? "Review test"
                             : "Review details"
                         : "Start here"}
                       <span aria-hidden="true">→</span>
@@ -988,16 +1123,30 @@ function Overview({
           <button
             className="primary-button full-width"
             type="button"
-            onClick={!detailsComplete ? onOpenDetails : !guideApproved ? onOpenGuide : onOpenHistory}
-            disabled={!isReady || historyReady}
+            onClick={
+              !detailsComplete
+                ? onOpenDetails
+                : !guideApproved
+                  ? onOpenGuide
+                  : !historyReady
+                    ? onOpenHistory
+                    : !teachingApproved
+                      ? onOpenTeach
+                      : onOpenTest
+            }
+            disabled={!isReady}
           >
             {!detailsComplete
               ? "Start setup"
               : !guideApproved
                 ? "Build decision guide"
-                : historyReady
-                  ? "Phase complete"
-                  : "Upload past decisions"}
+                : !historyReady
+                  ? "Upload past decisions"
+                  : !teachingApproved
+                    ? "Review teaching patterns"
+                    : practicePassed
+                      ? "Review Phase 4"
+                      : "Open practice test"}
           </button>
         </section>
 

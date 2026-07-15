@@ -74,15 +74,29 @@ test("removes starter assets and keeps the safety language", async () => {
   await access(root);
 });
 
-test("keeps later assessment capabilities locked in Phase 3", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+test("implements Phase 4 while keeping later assessment capabilities locked", async () => {
+  const [page, phase4, storage] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/phase4.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/phase4-storage.ts", import.meta.url), "utf8"),
+  ]);
 
   assert.match(page, /type="button" disabled>[\s\S]{0,120}>02<\/span>Applications/);
   assert.match(page, /type="button" disabled>[\s\S]{0,120}>03<\/span>Review/);
   assert.match(page, /type="button" disabled>[\s\S]{0,120}>04<\/span>Results/);
   assert.match(page, /Minder can only recommend that the application does not progress/);
   assert.match(page, /Missing or conflicting evidence always goes to Human Review/);
-  assert.match(page, /type ActiveView = "overview" \| "details" \| "guide" \| "history"/);
-  assert.match(page, /step\.number === 3 && guideApproved/);
+  assert.match(page, /type ActiveView = "overview" \| "details" \| "guide" \| "history" \| "learning"/);
+  assert.match(page, /step\.number === 4 && historyReady/);
+  assert.match(page, /step\.number === 5 && teachingApproved/);
   assert.match(page, /historyStorageState === "verified"/);
+  assert.match(phase4, /AI service not connected/);
+  assert.match(phase4, /Historical agreement is not truth/);
+  assert.match(phase4, /Approve for supervised pilot/);
+  assert.match(phase4, /Human relevance check/);
+  assert.match(phase4, /validateAiAssessmentBatch/);
+  assert.match(storage, /predictions_committed/);
+  assert.match(storage, /PHASE4_CONSUMED_STORE, SEALED_STORE/);
+  assert.match(storage, /one-use reveal/);
+  assert.doesNotMatch(storage, /loadCompleteSealedOutcomeKey/);
 });
