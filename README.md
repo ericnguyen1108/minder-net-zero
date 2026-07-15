@@ -14,15 +14,15 @@ Minder Net Zero is a guided application-review workspace for competition organis
 ## Delivery phases
 
 1. Guided setup journey and approval gates
-2. Historical data import and validation
-3. Decision-guide learning and practice testing
-4. Evidence-bound batch assessment
-5. Human review, exports, roles, and secure persistence
-6. Managed AI connection, deployment, and operating guide
+2. Decision Guide builder and version approval
+3. Historical data import and validation
+4. Decision-guide learning and practice testing
+5. Evidence-bound batch assessment
+6. Human review, exports, roles, secure persistence, and managed AI operation
 
 ## Current phase
 
-Phase 1 is implemented. It includes the eight-step organiser journey, competition details, locked assessment state, explicit human control, safety promises, progress tracking, and device-local draft saving.
+Phases 1 and 2 are implemented. The app now includes the eight-step organiser journey plus a plain-language Decision Guide builder for eligibility, elimination, scoring criteria, weights, score anchors, recommendation thresholds, tie-break priorities, missing-information safeguards, validation, human approval, and immutable approved versions. Drafts remain device-local until secure shared persistence is added in a later phase.
 
 ## Local development
 

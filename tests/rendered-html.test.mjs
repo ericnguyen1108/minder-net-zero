@@ -36,6 +36,7 @@ test("server-renders the Minder Net Zero setup experience", async () => {
   assert.match(html, /Prepare a trustworthy assessment/);
   assert.match(html, /Minder recommends\. People decide\./);
   assert.match(html, /Assessment is off/);
+  assert.match(html, /Build your decision guide/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
@@ -48,6 +49,12 @@ test("removes starter assets and keeps the Phase 1 safety language", async () =>
 
   assert.match(page, /Minder cannot make a final shortlist or rejection on its own/);
   assert.match(page, /Nothing is used without approval/);
+  assert.match(page, /Rules first, patterns later/);
+  assert.match(page, /weightsTotal === 100/);
+  assert.match(page, /missingInformationAcknowledged/);
+  assert.match(page, /A person confirms every outcome/);
+  assert.match(page, /rules: \[\]/);
+  assert.doesNotMatch(page, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
   assert.match(layout, /fair, evidence-backed application review/i);
   assert.doesNotMatch(packageJson, /react-loading-skeleton|site-creator-vinext-starter/);
 
@@ -55,4 +62,14 @@ test("removes starter assets and keeps the Phase 1 safety language", async () =>
   await access(new URL("../public/og.png", import.meta.url));
   await access(new URL("../.openai/hosting.json", import.meta.url));
   await access(root);
+});
+
+test("keeps later assessment capabilities locked in Phase 2", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /type="button" disabled>[\s\S]{0,120}>02<\/span>Applications/);
+  assert.match(page, /type="button" disabled>[\s\S]{0,120}>03<\/span>Review/);
+  assert.match(page, /type="button" disabled>[\s\S]{0,120}>04<\/span>Results/);
+  assert.match(page, /Minder can only recommend that the application does not progress/);
+  assert.match(page, /Missing or conflicting evidence always goes to Human Review/);
 });
