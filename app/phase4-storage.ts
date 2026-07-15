@@ -101,6 +101,7 @@ export type Phase4Session = {
   promptVersion: typeof PHASE4_PROMPT_VERSION;
   outputSchemaVersion: typeof PHASE4_SCHEMA_VERSION;
   modelId: string | null;
+  assessmentProtocolHash: string | null;
   patternStatus: "not_started" | "generating" | "reviewing" | "approved";
   patternProcessedRows: number;
   patternProgress: number;
@@ -315,6 +316,8 @@ function sessionIsCoherent(session: Phase4Session) {
     session.revision < 0 ||
     session.promptVersion !== PHASE4_PROMPT_VERSION ||
     session.outputSchemaVersion !== PHASE4_SCHEMA_VERSION ||
+    (session.assessmentProtocolHash !== null &&
+      !/^[a-f0-9]{64}$/.test(session.assessmentProtocolHash)) ||
     !session.guideContentHash ||
     !Number.isInteger(session.patternProcessedRows) ||
     session.patternProcessedRows < 0 ||
@@ -401,6 +404,7 @@ function sessionIsCoherent(session: Phase4Session) {
     session.practiceStatus === "not_started" &&
     (session.acceptancePolicy !== null ||
       session.assessments.length !== 0 ||
+      session.assessmentProtocolHash !== null ||
       session.predictionHash !== null ||
       session.outcomes !== null ||
       session.metrics !== null ||
@@ -416,6 +420,7 @@ function sessionIsCoherent(session: Phase4Session) {
   if (
     session.practiceStatus === "policy_locked" &&
     (session.assessments.length !== 0 ||
+      session.assessmentProtocolHash !== null ||
       session.predictionHash !== null ||
       session.outcomes !== null ||
       session.metrics !== null ||
@@ -432,8 +437,11 @@ function sessionIsCoherent(session: Phase4Session) {
   ) {
     return false;
   }
+  if (session.assessments.length > 0 && !session.assessmentProtocolHash) return false;
   const predictionsComplete =
-    session.assessments.length === session.sealedRows && Boolean(session.predictionHash);
+    session.assessments.length === session.sealedRows &&
+    Boolean(session.predictionHash) &&
+    Boolean(session.assessmentProtocolHash);
   if (
     (session.practiceStatus === "predictions_committed" ||
       session.practiceStatus === "revealed" ||
@@ -587,7 +595,9 @@ function sessionTransitionAllowed(current: Phase4Session, next: Phase4Session) {
   if (
     next.revision !== current.revision ||
     immutableKeys.some((key) => !sameValue(current[key], next[key])) ||
-    (current.modelId !== null && next.modelId !== current.modelId)
+    (current.modelId !== null && next.modelId !== current.modelId) ||
+    (current.assessmentProtocolHash !== null &&
+      next.assessmentProtocolHash !== current.assessmentProtocolHash)
   ) {
     return false;
   }
@@ -689,6 +699,7 @@ function metricsHashPayload(session: Phase4Session) {
     acceptancePolicy: session.acceptancePolicy,
     metrics: session.metrics,
     evidenceReviewSampleIds: session.evidenceReviewSampleIds,
+    assessmentProtocolHash: session.assessmentProtocolHash,
   };
 }
 
@@ -696,6 +707,7 @@ function initialSessionIsPristine(session: Phase4Session) {
   return (
     session.revision === 0 &&
     session.modelId === null &&
+    session.assessmentProtocolHash === null &&
     session.patternStatus === "not_started" &&
     session.patternProcessedRows === 0 &&
     session.patternProgress === 0 &&
@@ -889,6 +901,7 @@ export async function createPhase4Session(args: {
     promptVersion: PHASE4_PROMPT_VERSION,
     outputSchemaVersion: PHASE4_SCHEMA_VERSION,
     modelId: null,
+    assessmentProtocolHash: null,
     patternStatus: "not_started",
     patternProcessedRows: 0,
     patternProgress: 0,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { GET, POST } from "../app/api/phase4/route.ts";
+import { getPhase4AssessmentProtocolHash } from "../app/phase4-protocol.ts";
 
 const guide = {
   version: 1,
@@ -36,6 +37,7 @@ test("reports a server-managed but unconfigured AI connection without exposing a
     const response = await GET(localRequest());
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
+      assessmentProtocolHash: await getPhase4AssessmentProtocolHash(),
       ai: { configured: false, state: "not_configured", serverManaged: true },
     });
     const post = await POST(
@@ -120,6 +122,42 @@ test("rejects sealed outcomes and identity fields before calling OpenAI", async 
       );
       assert.equal(response.status, 400);
       assert.equal((await response.json()).error.code, "invalid_request");
+    }
+    for (const heading of [
+      "Team name",
+      "Application ID",
+      "Outcome",
+      "Reviewer notes",
+      "Judge score",
+      "Total score",
+      "Gender",
+      "team_name",
+      "application-id",
+      "final_outcome",
+      "reviewer.notes",
+      "judge_score",
+      "total-score",
+      "challenge_track",
+    ]) {
+      const response = await POST(
+        localRequest("/api/phase4", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "assess_cases",
+            guide,
+            approvedPatterns: [],
+            cases: [
+              {
+                row_id: "sealed-sensitive-heading",
+                answers: [{ heading, value: "DO-NOT-SEND" }],
+              },
+            ],
+          }),
+        }),
+      );
+      assert.equal(response.status, 400, heading);
+      assert.equal((await response.json()).error.code, "unsafe_fields", heading);
     }
     assert.equal(upstreamCalls, 0);
   } finally {
@@ -265,6 +303,7 @@ test("sends only strict, non-stored structured requests through the server gatew
     assert.match(captured.init.headers.Authorization, /^Bearer test-server-only-key$/);
     const publicBody = JSON.stringify(await response.json());
     assert.doesNotMatch(publicBody, /test-server-only-key|Authorization|Bearer/i);
+    assert.doesNotMatch(publicBody, /assessmentProtocolHash/);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -273,15 +312,16 @@ test("sends only strict, non-stored structured requests through the server gatew
 });
 
 test("keeps OpenAI credentials and direct OpenAI calls out of client modules", async () => {
-  const [page, phase4, logic, storage, route] = await Promise.all([
+  const [page, phase4, logic, storage, route, protocol] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4-logic.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4-storage.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/phase4/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/phase4-protocol.ts", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(`${page}\n${phase4}\n${logic}\n${storage}`, /OPENAI_API_KEY|api\.openai\.com/);
   assert.match(route, /OPENAI_API_KEY/);
   assert.match(route, /https:\/\/api\.openai\.com\/v1\/responses/);
-  assert.match(route, /store:\s*false/);
+  assert.match(protocol, /storeResponse:\s*false/);
 });

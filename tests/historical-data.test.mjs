@@ -252,7 +252,7 @@ test("fails closed when stored assignments are changed without a new integrity s
   });
   await saveHistoricalDataset(dataset);
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 4);
+    const request = indexedDB.open("minder-net-zero-private-v1", 5);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -347,6 +347,7 @@ test("keeps sealed outcomes hidden until a complete prediction set is committed"
   session = await savePhase4Session({ ...session, practiceStatus: "running" });
   session = await savePhase4Session({
     ...session,
+    assessmentProtocolHash: "1".repeat(64),
     assessments,
   });
   session = await savePhase4Session({
@@ -370,7 +371,7 @@ test("keeps sealed outcomes hidden until a complete prediction set is committed"
   assert.equal(revealed.practiceStatus, "revealed");
   assert.equal(revealed.outcomes.length, blind.length);
   const receiptDatabase = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 4);
+    const request = indexedDB.open("minder-net-zero-private-v1", 5);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });

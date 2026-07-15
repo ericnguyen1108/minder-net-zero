@@ -4,6 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { HistoricalImportBuilder } from "./historical-import";
 import { Phase4Workspace } from "./phase4";
+import { CurrentImportBuilder } from "./current-import";
+import { AssessmentWorkspace, SafeguardsWorkspace } from "./phase5";
+import type { Phase5FullGuide } from "./phase5";
 import {
   EMPTY_HISTORICAL_IMPORT,
   loadActiveHistoricalSummary,
@@ -17,12 +20,28 @@ import {
   sanitizePhase4Summary,
 } from "./phase4-storage";
 import type { Phase4Summary } from "./phase4-storage";
+import type { Phase4Session } from "./phase4-storage";
+import {
+  loadActiveCurrentSummary,
+  sanitizeCurrentImportSummary,
+  EMPTY_CURRENT_IMPORT,
+} from "./current-data";
+import type { CurrentImportSummary } from "./current-data";
+import {
+  loadLatestPhase5Run,
+  loadPhase5SafeguardApproval,
+} from "./phase5-storage";
+import type {
+  Phase5Run,
+  Phase5SafeguardApproval,
+} from "./phase5-storage";
 import { createPhase4InputFingerprint } from "./phase4-logic";
 
 const LEGACY_STORAGE_KEY = "minder-net-zero-phase-1";
 const V2_STORAGE_KEY = "minder-net-zero-app-v2";
 const V3_STORAGE_KEY = "minder-net-zero-app-v3";
-const STORAGE_KEY = "minder-net-zero-app-v4";
+const V4_STORAGE_KEY = "minder-net-zero-app-v4";
+const STORAGE_KEY = "minder-net-zero-app-v5";
 
 type CompetitionDetails = {
   competitionName: string;
@@ -79,15 +98,24 @@ type ApprovedSnapshot = {
 };
 
 type StoredState = {
-  schemaVersion: 4;
+  schemaVersion: 5;
   details: CompetitionDetails;
   guide: DecisionGuide;
   approvedVersions: ApprovedSnapshot[];
   historicalImport: HistoricalImportSummary;
   phase4: Phase4Summary;
+  currentImport: CurrentImportSummary;
 };
 
-type ActiveView = "overview" | "details" | "guide" | "history" | "learning";
+type ActiveView =
+  | "overview"
+  | "details"
+  | "guide"
+  | "history"
+  | "learning"
+  | "safeguards"
+  | "applications"
+  | "assessment";
 type GuideSection = "entry" | "scoring" | "recommendation" | "approval";
 
 type RuleEditorState = {
@@ -171,7 +199,7 @@ const SETUP_STEPS: SetupStep[] = [
   {
     number: 8,
     title: "Assess and review",
-    description: "Review evidence, confirm decisions and export results.",
+    description: "Generate provisional recommendations and check their evidence.",
     section: "Assess",
   },
 ];
@@ -357,12 +385,13 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
   if (typeof window === "undefined") {
     return {
       state: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         details: DEFAULT_DETAILS,
         guide: createEmptyGuide(),
         approvedVersions: [],
         historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
         phase4: { ...EMPTY_PHASE4_SUMMARY },
+        currentImport: { ...EMPTY_CURRENT_IMPORT },
       },
       recovered: false,
     };
@@ -375,17 +404,40 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(parsed.details);
       return {
         state: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           details,
           guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
           approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
           historicalImport: sanitizeHistoricalImportSummary(parsed.historicalImport),
           phase4: sanitizePhase4Summary(parsed.phase4),
+          currentImport: sanitizeCurrentImportSummary(parsed.currentImport),
         },
         recovered: false,
       };
     } catch {
       // Fall through to the earlier safe draft instead of inventing replacement content.
+    }
+  }
+
+  const phaseFour = window.localStorage.getItem(V4_STORAGE_KEY);
+  if (phaseFour) {
+    try {
+      const parsed = JSON.parse(phaseFour) as Partial<StoredState>;
+      const details = sanitizeDetails(parsed.details);
+      return {
+        state: {
+          schemaVersion: 5,
+          details,
+          guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
+          approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
+          historicalImport: sanitizeHistoricalImportSummary(parsed.historicalImport),
+          phase4: sanitizePhase4Summary(parsed.phase4),
+          currentImport: { ...EMPTY_CURRENT_IMPORT },
+        },
+        recovered: Boolean(current),
+      };
+    } catch {
+      // Continue to the Phase 3 draft if the Phase 4 summary cannot be recovered.
     }
   }
 
@@ -396,14 +448,15 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(parsed.details);
       return {
         state: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           details,
           guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
           approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
           historicalImport: sanitizeHistoricalImportSummary(parsed.historicalImport),
           phase4: { ...EMPTY_PHASE4_SUMMARY },
+          currentImport: { ...EMPTY_CURRENT_IMPORT },
         },
-        recovered: Boolean(current),
+        recovered: Boolean(current || phaseFour),
       };
     } catch {
       // Continue to the earlier Decision Guide draft if it is still available.
@@ -417,14 +470,15 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(parsed.details);
       return {
         state: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           details,
           guide: sanitizeGuide(parsed.guide, details.shortlistTarget),
           approvedVersions: sanitizeSnapshots(parsed.approvedVersions),
           historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
           phase4: { ...EMPTY_PHASE4_SUMMARY },
+          currentImport: { ...EMPTY_CURRENT_IMPORT },
         },
-        recovered: Boolean(current || phaseThree),
+        recovered: Boolean(current || phaseFour || phaseThree),
       };
     } catch {
       // Continue to the Phase 1 setup details if they are still available.
@@ -437,14 +491,15 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
       const details = sanitizeDetails(JSON.parse(legacy));
       return {
         state: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           details,
           guide: createEmptyGuide(details.shortlistTarget),
           approvedVersions: [],
           historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
           phase4: { ...EMPTY_PHASE4_SUMMARY },
+          currentImport: { ...EMPTY_CURRENT_IMPORT },
         },
-        recovered: Boolean(current || phaseThree || phaseTwo),
+        recovered: Boolean(current || phaseFour || phaseThree || phaseTwo),
       };
     } catch {
       // Use a blank guide and clearly tell the user that recovery was needed.
@@ -453,14 +508,15 @@ function loadStoredState(): { state: StoredState; recovered: boolean } {
 
   return {
     state: {
-      schemaVersion: 4,
+      schemaVersion: 5,
       details: DEFAULT_DETAILS,
       guide: createEmptyGuide(),
       approvedVersions: [],
       historicalImport: { ...EMPTY_HISTORICAL_IMPORT },
       phase4: { ...EMPTY_PHASE4_SUMMARY },
+      currentImport: { ...EMPTY_CURRENT_IMPORT },
     },
-    recovered: Boolean(current || phaseThree || phaseTwo || legacy),
+    recovered: Boolean(current || phaseFour || phaseThree || phaseTwo || legacy),
   };
 }
 
@@ -605,8 +661,17 @@ export default function Home() {
     ...EMPTY_HISTORICAL_IMPORT,
   });
   const [phase4, setPhase4] = useState<Phase4Summary>({ ...EMPTY_PHASE4_SUMMARY });
+  const [phase4Session, setPhase4Session] = useState<Phase4Session | null>(null);
+  const [phase5Approval, setPhase5Approval] = useState<Phase5SafeguardApproval | null>(null);
+  const [currentImport, setCurrentImport] = useState<CurrentImportSummary>({
+    ...EMPTY_CURRENT_IMPORT,
+  });
+  const [phase5Run, setPhase5Run] = useState<Phase5Run | null>(null);
   const [phase4Start, setPhase4Start] = useState<"teach" | "test">("teach");
   const [historyStorageState, setHistoryStorageState] = useState<
+    "unverified" | "verifying" | "verified" | "unavailable"
+  >("unverified");
+  const [currentStorageState, setCurrentStorageState] = useState<
     "unverified" | "verifying" | "verified" | "unavailable"
   >("unverified");
   const [isReady, setIsReady] = useState(false);
@@ -624,11 +689,15 @@ export default function Home() {
     setApprovedVersions(loaded.state.approvedVersions);
     setHistoricalImport(loaded.state.historicalImport);
     setPhase4(loaded.state.phase4);
+    setCurrentImport(loaded.state.currentImport);
     setSaveState(loaded.recovered ? "recovered" : "saved");
     setIsReady(true);
     setHistoryStorageState("verifying");
-    void loadActiveHistoricalSummary()
-      .then(async (activeSummary) => {
+    setCurrentStorageState("verifying");
+    void (async () => {
+      try {
+        const activeSummary = await loadActiveHistoricalSummary();
+        let verifiedPhase4: Phase4Session | null = null;
         if (activeSummary) {
           setHistoricalImport(activeSummary);
           if (
@@ -641,38 +710,69 @@ export default function Home() {
               loaded.state.guide.version,
             );
             const currentGuideHash = await createPhase4InputFingerprint(loaded.state.guide);
-            setPhase4(
+            verifiedPhase4 =
               storedPhase4 && storedPhase4.guideContentHash === currentGuideHash
-                ? phase4SummaryFromSession(storedPhase4)
+                ? storedPhase4
+                : null;
+            setPhase4(
+              verifiedPhase4
+                ? phase4SummaryFromSession(verifiedPhase4)
                 : { ...EMPTY_PHASE4_SUMMARY },
             );
+            setPhase4Session(verifiedPhase4);
           } else {
             setPhase4({ ...EMPTY_PHASE4_SUMMARY });
+            setPhase4Session(null);
           }
         } else if (loaded.state.historicalImport.status === "ready") {
           setHistoricalImport((current) => ({ ...current, status: "missing" }));
           setPhase4({ ...EMPTY_PHASE4_SUMMARY });
+          setPhase4Session(null);
         }
         setHistoryStorageState("verified");
-      })
-      .catch(() => {
+        if (verifiedPhase4?.practiceStatus === "passed") {
+          setPhase5Approval(await loadPhase5SafeguardApproval(verifiedPhase4));
+        } else {
+          setPhase5Approval(null);
+        }
+
+        const currentSummary = await loadActiveCurrentSummary();
+        if (currentSummary) {
+          setCurrentImport(currentSummary);
+          if (currentSummary.datasetId) {
+            const latestRun = await loadLatestPhase5Run(currentSummary.datasetId);
+            setPhase5Run(latestRun);
+          }
+        } else if (loaded.state.currentImport.status === "ready") {
+          setCurrentImport((current) => ({ ...current, status: "missing" }));
+        }
+        setCurrentStorageState("verified");
+      } catch {
         setHistoricalImport((current) =>
           current.status === "ready" ? { ...current, status: "missing" } : current,
         );
         setPhase4({ ...EMPTY_PHASE4_SUMMARY });
+        setPhase4Session(null);
+        setPhase5Approval(null);
         setHistoryStorageState("unavailable");
-      });
+        setCurrentImport((current) =>
+          current.status === "ready" ? { ...current, status: "missing" } : current,
+        );
+        setCurrentStorageState("unavailable");
+      }
+    })();
   }, []);
 
   useEffect(() => {
     if (!isReady) return;
     const state: StoredState = {
-      schemaVersion: 4,
+      schemaVersion: 5,
       details: savedDetails,
       guide,
       approvedVersions,
       historicalImport,
       phase4,
+      currentImport,
     };
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -685,7 +785,7 @@ export default function Home() {
     } catch {
       setSaveState("error");
     }
-  }, [approvedVersions, guide, historicalImport, isReady, phase4, savedDetails]);
+  }, [approvedVersions, currentImport, guide, historicalImport, isReady, phase4, savedDetails]);
 
   const detailsComplete = useMemo(
     () =>
@@ -715,12 +815,50 @@ export default function Home() {
       phase4.status === "practice_passed" ||
       phase4.status === "practice_failed");
   const practicePassed = phase4Matches && phase4.status === "practice_passed";
+  const phase4SessionMatches =
+    practicePassed &&
+    phase4Session?.id === `phase4:${historicalImport.datasetId}:guide-${guide.version}` &&
+    phase4Session.practiceStatus === "passed" &&
+    phase4Session.guideContentHash &&
+    phase4Session.metricsHash &&
+    phase4Session.assessmentProtocolHash;
+  const safeguardsApproved = Boolean(
+    phase4SessionMatches &&
+      phase5Approval &&
+      phase5Approval.phase4SessionId === phase4Session?.id &&
+      phase5Approval.phase4MetricsHash === phase4Session?.metricsHash &&
+      phase5Approval.guideContentHash === phase4Session?.guideContentHash &&
+      phase5Approval.assessmentProtocolHash === phase4Session?.assessmentProtocolHash,
+  );
+  const currentReady = Boolean(
+    safeguardsApproved &&
+      currentStorageState === "verified" &&
+      currentImport.status === "ready" &&
+      currentImport.datasetId &&
+      currentImport.totalRows > 0 &&
+      currentImport.readyRows === currentImport.totalRows &&
+      currentImport.blockedRows === 0,
+  );
+  const phase5RunMatches = Boolean(
+    currentReady &&
+      phase5Run &&
+      phase5Run.datasetId === currentImport.datasetId &&
+      phase5Run.contract.phase4SessionId === phase4Session?.id &&
+      phase5Run.contract.guideContentHash === phase4Session?.guideContentHash &&
+      phase5Run.contract.assessmentProtocolHash === phase4Session?.assessmentProtocolHash &&
+      phase5Run.contract.datasetFingerprint === currentImport.datasetFingerprint,
+  );
+  const assessmentComplete =
+    phase5RunMatches && phase5Run?.status === "ready_for_human_review";
   const completedSteps =
     (detailsComplete ? 1 : 0) +
     (guideApproved ? 1 : 0) +
     (historyReady ? 1 : 0) +
     (teachingApproved ? 1 : 0) +
-    (practicePassed ? 1 : 0);
+    (practicePassed ? 1 : 0) +
+    (safeguardsApproved ? 1 : 0) +
+    (currentReady ? 1 : 0) +
+    (assessmentComplete ? 1 : 0);
   const formComplete = Boolean(
     trimmed(details.competitionName) &&
       trimmed(details.organiserName) &&
@@ -783,10 +921,52 @@ export default function Home() {
     setActiveView("learning");
   }
 
+  function openSafeguards() {
+    if (!practicePassed || !phase4SessionMatches || !phase4Session) return;
+    setActiveView("safeguards");
+  }
+
+  function openApplications() {
+    if (!safeguardsApproved) return;
+    setActiveView("applications");
+  }
+
+  function openAssessment() {
+    if (!currentReady || !currentImport.datasetId) return;
+    setActiveView("assessment");
+  }
+
   function updateHistoricalImport(summary: HistoricalImportSummary) {
     setHistoricalImport(summary);
     if (summary.datasetId !== phase4.datasetId) setPhase4({ ...EMPTY_PHASE4_SUMMARY });
+    if (summary.datasetId !== phase4.datasetId) {
+      setPhase4Session(null);
+      setPhase5Approval(null);
+    }
     setHistoryStorageState("verified");
+  }
+
+  function updateCurrentImport(summary: CurrentImportSummary) {
+    if (summary.datasetId !== currentImport.datasetId) setPhase5Run(null);
+    setCurrentImport(summary);
+    setCurrentStorageState("verified");
+  }
+
+  function updatePhase4Summary(summary: Phase4Summary) {
+    setPhase4(summary);
+    if (
+      summary.status === "practice_passed" &&
+      summary.datasetId &&
+      summary.guideVersion
+    ) {
+      void loadPhase4Session(summary.datasetId, summary.guideVersion).then(async (session) => {
+        setPhase4Session(session);
+        setPhase5Approval(session ? await loadPhase5SafeguardApproval(session) : null);
+      });
+    } else {
+      setPhase4Session(null);
+      setPhase5Approval(null);
+    }
   }
 
   function approveGuide() {
@@ -861,13 +1041,13 @@ export default function Home() {
         </div>
 
         <nav className="main-nav" aria-label="Main navigation">
-          <button className="nav-item nav-item-active" type="button" onClick={() => setActiveView("overview")}>
+          <button className={`nav-item ${activeView !== "applications" && activeView !== "assessment" ? "nav-item-active" : ""}`} type="button" onClick={() => setActiveView("overview")}>
             <span className="nav-symbol" aria-hidden="true">01</span>Setup
           </button>
-          <button className="nav-item" type="button" disabled>
+          <button className={`nav-item ${activeView === "applications" ? "nav-item-active" : ""}`} type="button" disabled={!safeguardsApproved} onClick={openApplications}>
             <span className="nav-symbol" aria-hidden="true">02</span>Applications
           </button>
-          <button className="nav-item" type="button" disabled>
+          <button className={`nav-item ${activeView === "assessment" ? "nav-item-active" : ""}`} type="button" disabled={!currentReady} onClick={openAssessment}>
             <span className="nav-symbol" aria-hidden="true">03</span>Review
           </button>
           <button className="nav-item" type="button" disabled>
@@ -878,18 +1058,18 @@ export default function Home() {
         <div className="sidebar-safety">
           <div className="safety-lock" aria-hidden="true">✓</div>
           <div>
-            <strong>Assessment is off</strong>
-            <p>Minder cannot score applications until your rules and practice test are approved.</p>
+            <strong>{assessmentComplete ? "Human review is ready" : phase5RunMatches ? "Assessment is supervised" : safeguardsApproved ? "Guardrails are locked" : "Assessment is off"}</strong>
+            <p>{assessmentComplete ? "Provisional recommendations still need authorised human decisions." : phase5RunMatches ? `${phase5Run?.processedCases ?? 0} of ${phase5Run?.caseCount ?? 0} applications are safely saved.` : safeguardsApproved ? "Current applications can now be prepared for a test-data pilot." : "Minder cannot assess applications until the rules, practice test and safeguards are approved."}</p>
           </div>
         </div>
 
-        <div className="sidebar-footer"><span className="status-dot" />Private setup draft</div>
+        <div className="sidebar-footer"><span className="status-dot" />Private test-data pilot</div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
           <div>
-            <div className="eyebrow">Competition setup</div>
+            <div className="eyebrow">{activeView === "applications" ? "Current applications" : activeView === "assessment" ? "Supervised review" : "Competition setup"}</div>
             <h1>{savedDetails.competitionName || "Minder Net Zero"}</h1>
           </div>
           <div
@@ -918,6 +1098,9 @@ export default function Home() {
             historyReady={historyReady}
             teachingApproved={teachingApproved}
             practicePassed={practicePassed}
+            safeguardsApproved={safeguardsApproved}
+            currentReady={currentReady}
+            assessmentComplete={assessmentComplete}
             practiceFailed={phase4Matches && phase4.status === "practice_failed"}
             guideVersion={guide.version}
             isReady={isReady}
@@ -926,6 +1109,9 @@ export default function Home() {
             onOpenHistory={openHistory}
             onOpenTeach={() => openPhase4("teach")}
             onOpenTest={() => openPhase4("test")}
+            onOpenSafeguards={openSafeguards}
+            onOpenApplications={openApplications}
+            onOpenAssessment={openAssessment}
           />
         ) : activeView === "details" ? (
           <CompetitionForm
@@ -957,15 +1143,44 @@ export default function Home() {
             onSummaryChange={updateHistoricalImport}
             onBack={() => setActiveView("overview")}
           />
-        ) : historicalImport.datasetId ? (
+        ) : activeView === "learning" && historicalImport.datasetId ? (
           <Phase4Workspace
             key={`${historicalImport.datasetId}-${guide.version}-${phase4Start}`}
             datasetId={historicalImport.datasetId}
             guide={guide}
             organiserName={savedDetails.organiserName}
             initialStep={phase4Start}
-            onSummaryChange={setPhase4}
+            onSummaryChange={updatePhase4Summary}
             onBack={() => setActiveView("overview")}
+          />
+        ) : activeView === "safeguards" && phase4Session ? (
+          <SafeguardsWorkspace
+            phase4={phase4Session}
+            organiserName={savedDetails.organiserName}
+            approval={phase5Approval}
+            onApproved={setPhase5Approval}
+            onContinue={openApplications}
+            onBack={() => setActiveView("overview")}
+          />
+        ) : activeView === "applications" ? (
+          <CurrentImportBuilder
+            summary={currentImport}
+            assessmentStarted={Boolean(phase5Run)}
+            assessmentInvalid={phase5Run?.status === "invalid"}
+            onSummaryChange={updateCurrentImport}
+            onSupersededDataset={() => setPhase5Run(null)}
+            onContinue={openAssessment}
+            onBack={() => setActiveView("overview")}
+          />
+        ) : activeView === "assessment" && currentImport.datasetId && phase4Session && phase5Approval ? (
+          <AssessmentWorkspace
+            datasetId={currentImport.datasetId}
+            guide={guide as Phase5FullGuide}
+            phase4={phase4Session}
+            safeguards={phase5Approval}
+            onRunChange={setPhase5Run}
+            onBack={openApplications}
+            onRecalibrate={() => setActiveView("overview")}
           />
         ) : null}
       </main>
@@ -980,6 +1195,9 @@ function Overview({
   historyReady,
   teachingApproved,
   practicePassed,
+  safeguardsApproved,
+  currentReady,
+  assessmentComplete,
   practiceFailed,
   guideVersion,
   isReady,
@@ -988,6 +1206,9 @@ function Overview({
   onOpenHistory,
   onOpenTeach,
   onOpenTest,
+  onOpenSafeguards,
+  onOpenApplications,
+  onOpenAssessment,
 }: {
   completedSteps: number;
   detailsComplete: boolean;
@@ -995,6 +1216,9 @@ function Overview({
   historyReady: boolean;
   teachingApproved: boolean;
   practicePassed: boolean;
+  safeguardsApproved: boolean;
+  currentReady: boolean;
+  assessmentComplete: boolean;
   practiceFailed: boolean;
   guideVersion: number;
   isReady: boolean;
@@ -1003,6 +1227,9 @@ function Overview({
   onOpenHistory: () => void;
   onOpenTeach: () => void;
   onOpenTest: () => void;
+  onOpenSafeguards: () => void;
+  onOpenApplications: () => void;
+  onOpenAssessment: () => void;
 }) {
   const nextTitle = !detailsComplete
     ? "Add competition details"
@@ -1016,7 +1243,13 @@ function Overview({
             ? practiceFailed
               ? "Review the failed practice test"
               : "Run the blind practice test"
-            : "Phase 4 is approved";
+            : !safeguardsApproved
+              ? "Confirm the operating safeguards"
+              : !currentReady
+                ? "Prepare current applications"
+                : !assessmentComplete
+                  ? "Run supervised assessment"
+                  : "Recommendations await human decisions";
   const nextBody = !detailsComplete
     ? "Tell Minder who owns this competition and how many teams you plan to shortlist."
     : !guideApproved
@@ -1027,7 +1260,13 @@ function Overview({
           ? "Minder can now look for possible patterns in the teaching set. Every pattern needs your decision."
           : !practicePassed
             ? "Lock your pass rules before Minder assesses the sealed set. Past outcomes stay hidden until every recommendation is committed."
-            : "Teaching guidance and the blind practice result are approved. Live assessment remains off until safeguards are confirmed in Phase 5.";
+            : !safeguardsApproved
+              ? "The practice test passed. Lock the safeguards that uncertainty, missing evidence and final decisions cannot bypass."
+              : !currentReady
+                ? "Safeguards are locked. Import one complete, de-identified current-application set and reconcile every row."
+                : !assessmentComplete
+                  ? "The current set is frozen. Process it in resumable evidence-bound batches; people still make every final decision."
+                  : "The fixed evidence audit passed. Provisional recommendations are ready for the full human-review phase.";
 
   return (
     <div className="content-grid">
@@ -1058,14 +1297,20 @@ function Overview({
                       ? teachingApproved
                       : step.number === 5
                         ? practicePassed
-                        : false;
+                        : step.number === 6
+                          ? safeguardsApproved
+                          : step.number === 7
+                            ? currentReady
+                            : assessmentComplete;
             const available =
               step.number === 1 ||
               (step.number === 2 && detailsComplete) ||
               (step.number === 3 && guideApproved) ||
               (step.number === 4 && historyReady) ||
-              (step.number === 5 && teachingApproved);
-            const readyNext = step.number === 6 && practicePassed;
+              (step.number === 5 && teachingApproved) ||
+              (step.number === 6 && practicePassed) ||
+              (step.number === 7 && safeguardsApproved) ||
+              (step.number === 8 && currentReady);
             const action =
               step.number === 1
                 ? onOpenDetails
@@ -1075,10 +1320,32 @@ function Overview({
                     ? onOpenHistory
                     : step.number === 4
                       ? onOpenTeach
-                      : onOpenTest;
+                      : step.number === 5
+                        ? onOpenTest
+                        : step.number === 6
+                          ? onOpenSafeguards
+                          : step.number === 7
+                            ? onOpenApplications
+                            : onOpenAssessment;
+            const completeLabel =
+              step.number === 1
+                ? "Review details"
+                : step.number === 2
+                  ? `Review Version ${guideVersion}`
+                  : step.number === 3
+                    ? "Review import"
+                    : step.number === 4
+                      ? "Review teaching"
+                      : step.number === 5
+                        ? "Review test"
+                        : step.number === 6
+                          ? "Review safeguards"
+                          : step.number === 7
+                            ? "Review applications"
+                            : "Review recommendations";
             return (
               <article
-                className={`step-card ${available ? "step-available" : "step-locked"} ${complete ? "step-complete" : ""} ${readyNext ? "step-ready-next" : ""}`}
+                className={`step-card ${available ? "step-available" : "step-locked"} ${complete ? "step-complete" : ""}`}
                 key={step.number}
               >
                 <div className="step-number" aria-hidden="true">{complete ? "✓" : String(step.number).padStart(2, "0")}</div>
@@ -1090,21 +1357,9 @@ function Overview({
                 <div className="step-action">
                   {available ? (
                     <button className="text-button" type="button" onClick={action}>
-                      {complete
-                        ? step.number === 2
-                          ? `Review Version ${guideVersion}`
-                          : step.number === 3
-                            ? "Review import"
-                            : step.number === 4
-                              ? "Review teaching"
-                              : step.number === 5
-                                ? "Review test"
-                            : "Review details"
-                        : "Start here"}
+                      {complete ? completeLabel : "Start here"}
                       <span aria-hidden="true">→</span>
                     </button>
-                  ) : readyNext ? (
-                    <span className="ready-label"><span aria-hidden="true">✓</span> Ready next</span>
                   ) : (
                     <span className="locked-label"><span aria-hidden="true">•</span> Locked</span>
                   )}
@@ -1130,9 +1385,15 @@ function Overview({
                   ? onOpenGuide
                   : !historyReady
                     ? onOpenHistory
-                    : !teachingApproved
-                      ? onOpenTeach
-                      : onOpenTest
+                      : !teachingApproved
+                        ? onOpenTeach
+                      : !practicePassed
+                        ? onOpenTest
+                        : !safeguardsApproved
+                          ? onOpenSafeguards
+                          : !currentReady
+                            ? onOpenApplications
+                            : onOpenAssessment
             }
             disabled={!isReady}
           >
@@ -1142,11 +1403,17 @@ function Overview({
                 ? "Build decision guide"
                 : !historyReady
                   ? "Upload past decisions"
-                  : !teachingApproved
-                    ? "Review teaching patterns"
-                    : practicePassed
-                      ? "Review Phase 4"
-                      : "Open practice test"}
+                    : !teachingApproved
+                      ? "Review teaching patterns"
+                    : !practicePassed
+                      ? "Open practice test"
+                      : !safeguardsApproved
+                        ? "Confirm safeguards"
+                        : !currentReady
+                          ? "Upload current applications"
+                          : assessmentComplete
+                            ? "Review recommendations"
+                            : "Start supervised assessment"}
           </button>
         </section>
 

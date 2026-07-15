@@ -12,6 +12,7 @@ import type {
   Phase4ApprovedGuide,
   Phase4SourceRow,
 } from "./phase4-logic";
+import { getPhase4AssessmentProtocolHash } from "./phase4-protocol";
 import {
   loadBlindPracticeRows,
   loadHistoricalDatasetBinding,
@@ -288,6 +289,7 @@ function metricsMeetTargets(session: Phase4Session) {
 
 function practiceTargetsPass(session: Phase4Session) {
   return (
+    Boolean(session.assessmentProtocolHash) &&
     metricsMeetTargets(session) &&
     session.evidenceReviewSampleIds.length > 0 &&
     session.evidenceReviewSampleIds.every((rowId) =>
@@ -364,13 +366,24 @@ export function Phase4Workspace({
       const body = (await response.json().catch(() => null)) as unknown;
       const source = record(body);
       const ai = record(source?.ai);
-      if (response.ok && ai?.configured === true) {
+      const assessmentProtocolHash = stringValue(source?.assessmentProtocolHash, 64);
+      if (
+        response.ok &&
+        ai?.configured === true &&
+        /^[a-f0-9]{64}$/.test(assessmentProtocolHash) &&
+        (!session?.assessmentProtocolHash ||
+          session.assessmentProtocolHash === assessmentProtocolHash)
+      ) {
         setConnection("connected");
         return;
       }
       setConnection("not_connected");
       setConnectionMessage(
-        stringValue(ai?.message, 500) || stringValue(record(source?.error)?.message, 500),
+        session?.assessmentProtocolHash &&
+          assessmentProtocolHash &&
+          session.assessmentProtocolHash !== assessmentProtocolHash
+          ? "The assessment protocol changed. Start a new calibration before continuing."
+          : stringValue(ai?.message, 500) || stringValue(record(source?.error)?.message, 500),
       );
     } catch {
       setConnection("unavailable");
@@ -389,13 +402,24 @@ export function Phase4Workspace({
         if (cancelled) return;
         const source = record(body);
         const ai = record(source?.ai);
-        if (response.ok && ai?.configured === true) {
+        const assessmentProtocolHash = stringValue(source?.assessmentProtocolHash, 64);
+        if (
+          response.ok &&
+          ai?.configured === true &&
+          /^[a-f0-9]{64}$/.test(assessmentProtocolHash) &&
+          (!session?.assessmentProtocolHash ||
+            session.assessmentProtocolHash === assessmentProtocolHash)
+        ) {
           setConnection("connected");
           return;
         }
         setConnection("not_connected");
         setConnectionMessage(
-          stringValue(ai?.message, 500) || stringValue(record(source?.error)?.message, 500),
+          session?.assessmentProtocolHash &&
+            assessmentProtocolHash &&
+            session.assessmentProtocolHash !== assessmentProtocolHash
+            ? "The assessment protocol changed. Start a new calibration before continuing."
+            : stringValue(ai?.message, 500) || stringValue(record(source?.error)?.message, 500),
         );
       })
       .catch(() => {
@@ -406,7 +430,7 @@ export function Phase4Workspace({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session?.assessmentProtocolHash]);
 
   useEffect(() => {
     let cancelled = false;
@@ -605,6 +629,15 @@ export function Phase4Workspace({
     setBusy(true);
     setError("");
     try {
+      const currentProtocolHash = await getPhase4AssessmentProtocolHash();
+      if (
+        session.assessmentProtocolHash &&
+        session.assessmentProtocolHash !== currentProtocolHash
+      ) {
+        throw new Error(
+          "The assessment prompt or schema changed. Start a new calibration before continuing.",
+        );
+      }
       const cases = (await loadBlindPracticeRows(datasetId)).sort((a, b) =>
         a.rowId.localeCompare(b.rowId),
       );
@@ -629,8 +662,18 @@ export function Phase4Workspace({
             })),
         });
         const model = stringValue(body.model, 200);
+        const assessmentProtocolHash = stringValue(body.assessmentProtocolHash, 64);
+        if (!/^[a-f0-9]{64}$/.test(assessmentProtocolHash)) {
+          throw new Error("The AI service did not return the locked assessment-protocol receipt.");
+        }
         if (working.modelId && model && model !== working.modelId) {
           throw new Error("The AI model changed during the blind run. Minder stopped without substituting it.");
+        }
+        if (
+          working.assessmentProtocolHash &&
+          assessmentProtocolHash !== working.assessmentProtocolHash
+        ) {
+          throw new Error("The AI assessment protocol changed during the blind run. Minder stopped safely.");
         }
         const validation = validateAiAssessmentBatch(
           body.result,
@@ -644,6 +687,8 @@ export function Phase4Workspace({
         working = {
           ...working,
           modelId: working.modelId ?? model ?? null,
+          assessmentProtocolHash:
+            working.assessmentProtocolHash ?? assessmentProtocolHash,
           assessments: [
             ...working.assessments.filter((item) => !additionsById.has(item.rowId)),
             ...additions,
@@ -690,6 +735,7 @@ export function Phase4Workspace({
         acceptancePolicy: revealed.acceptancePolicy,
         metrics,
         evidenceReviewSampleIds,
+        assessmentProtocolHash: revealed.assessmentProtocolHash,
       });
       revealed = {
         ...revealed,
@@ -716,6 +762,7 @@ export function Phase4Workspace({
       acceptancePolicy: session.acceptancePolicy,
       metrics,
       evidenceReviewSampleIds,
+      assessmentProtocolHash: session.assessmentProtocolHash,
     });
     const next = {
       ...session,
@@ -770,7 +817,7 @@ export function Phase4Workspace({
   const resolvedPatterns = session?.patterns.filter((pattern) => pattern.decision !== "pending").length ?? 0;
   const approvedPatterns = session?.patterns.filter((pattern) => pattern.decision === "approved").length ?? 0;
   const rejectedPatterns = session?.patterns.filter((pattern) => pattern.decision === "rejected").length ?? 0;
-  const allPatternsResolved = Boolean(session) && resolvedPatterns === session.patterns.length;
+  const allPatternsResolved = session ? resolvedPatterns === session.patterns.length : false;
   const metricTargetsPass = Boolean(session && metricsMeetTargets(session));
   const targetsPass = Boolean(session && practiceTargetsPass(session));
   const outcomeById = useMemo(

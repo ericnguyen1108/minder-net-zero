@@ -160,13 +160,24 @@ export type SealedHistoricalDataset = {
 };
 
 const DB_NAME = "minder-net-zero-private-v1";
-const DB_VERSION = 4;
+// Keep every organiser workflow in one database so upgrades are atomic. Phase 5
+// adds separate current-application identity/content stores and revisioned run
+// stores; historical data remains untouched during the migration.
+const DB_VERSION = 5;
 const DATASETS_STORE = "historical-datasets";
 const TEACHING_STORE = "historical-teaching";
 export const SEALED_STORE = "historical-sealed";
 const ACTIVE_STORE = "historical-active";
 export const PHASE4_STORE = "phase4-sessions";
 export const PHASE4_CONSUMED_STORE = "phase4-consumed";
+const CURRENT_DATASETS_STORE = "current-datasets";
+const CURRENT_CASES_STORE = "current-cases";
+const CURRENT_IDENTITIES_STORE = "current-identities";
+const CURRENT_ACTIVE_STORE = "current-active";
+export const PHASE5_SAFEGUARDS_STORE = "phase5-safeguards";
+export const PHASE5_RUNS_STORE = "assessment-runs";
+export const PHASE5_BATCHES_STORE = "assessment-batches";
+export const PHASE5_RESULTS_STORE = "assessment-results";
 
 function safeCount(value: unknown) {
   const count = Number(value);
@@ -717,6 +728,39 @@ export function openDatabase() {
           store.createIndex("datasetId", "datasetId", { unique: false });
         }
       });
+      if (!database.objectStoreNames.contains(CURRENT_DATASETS_STORE)) {
+        database.createObjectStore(CURRENT_DATASETS_STORE, { keyPath: "id" });
+      }
+      [CURRENT_CASES_STORE, CURRENT_IDENTITIES_STORE].forEach((storeName) => {
+        if (!database.objectStoreNames.contains(storeName)) {
+          const store = database.createObjectStore(storeName, {
+            keyPath: ["datasetId", "rowId"],
+          });
+          store.createIndex("datasetId", "datasetId", { unique: false });
+        }
+      });
+      if (!database.objectStoreNames.contains(CURRENT_ACTIVE_STORE)) {
+        database.createObjectStore(CURRENT_ACTIVE_STORE, { keyPath: "key" });
+      }
+      if (!database.objectStoreNames.contains(PHASE5_SAFEGUARDS_STORE)) {
+        database.createObjectStore(PHASE5_SAFEGUARDS_STORE, { keyPath: "id" });
+      }
+      if (!database.objectStoreNames.contains(PHASE5_RUNS_STORE)) {
+        const store = database.createObjectStore(PHASE5_RUNS_STORE, { keyPath: "id" });
+        store.createIndex("datasetId", "datasetId", { unique: false });
+      }
+      if (!database.objectStoreNames.contains(PHASE5_BATCHES_STORE)) {
+        const store = database.createObjectStore(PHASE5_BATCHES_STORE, {
+          keyPath: ["runId", "batchId"],
+        });
+        store.createIndex("runId", "runId", { unique: false });
+      }
+      if (!database.objectStoreNames.contains(PHASE5_RESULTS_STORE)) {
+        const store = database.createObjectStore(PHASE5_RESULTS_STORE, {
+          keyPath: ["runId", "rowId"],
+        });
+        store.createIndex("runId", "runId", { unique: false });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("Private browser storage failed."));
