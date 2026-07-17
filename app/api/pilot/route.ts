@@ -158,6 +158,8 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
         reason: String(p.reason ?? "phase5_audit_failure"),
       });
       return { ok: true };
+    case "calibration.headroom":
+      return { headroom: await cal.revealHeadroom(String(p.datasetFingerprint)) };
 
     // ---- AI assessment (reference only) --------------------------------
     case "assessment.createRun":
