@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "db:migrate": "node scripts/apply-migrations.mjs",
+    "db:migrate:pilot": "node scripts/apply-pilot-migrations.mjs",
     "platform:provision": "node scripts/provision-platform.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
