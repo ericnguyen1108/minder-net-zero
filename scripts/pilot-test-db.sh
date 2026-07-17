@@ -26,8 +26,8 @@ psql -d "$DB" -v ON_ERROR_STOP=1 -q \
   -c "CREATE ROLE ${APP_ROLE} LOGIN IN ROLE netzero_app;"
 
 export TEST_PILOT_DATABASE_URL="postgres://${APP_ROLE}@localhost:5432/${DB}"
-echo "Running pilot marking integration test as ${APP_ROLE}..."
-node --test tests/pilot-marking.test.mjs
+echo "Running pilot integration tests as ${APP_ROLE}..."
+node --test tests/pilot-*.test.mjs
 
 dropdb --if-exists "$DB"
 echo "Pilot integration test database cleaned up."
