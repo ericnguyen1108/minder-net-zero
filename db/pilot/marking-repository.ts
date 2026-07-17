@@ -48,7 +48,7 @@ export type AiReference = {
 
 // --------------------------------------------------------------- workspace ---
 
-/** Gets the single pilot workspace, creating it on first use. */
+/** Gets the pilot workspace by name, creating it on first use. */
 export async function ensureWorkspace(
   name: string,
   expectedMarksPerApplication: number,
@@ -56,7 +56,7 @@ export async function ensureWorkspace(
 ): Promise<{ id: string; expectedMarksPerApplication: number }> {
   const [existing] = await sql<{ id: string; expected: number }[]>`
     SELECT id, expected_marks_per_application AS expected
-      FROM netzero.workspaces ORDER BY created_at LIMIT 1`;
+      FROM netzero.workspaces WHERE name = ${name} ORDER BY created_at LIMIT 1`;
   if (existing) {
     return { id: existing.id, expectedMarksPerApplication: existing.expected };
   }
@@ -124,6 +124,82 @@ export async function loadApprovedGuide(
      WHERE guide_version_id = ${guide.guideVersionId}
      ORDER BY position`;
   return { ...guide, criteria };
+}
+
+/**
+ * Saves the single editable draft guide for the workspace (creating it, or
+ * replacing the existing draft's fields and criteria). Approved versions are
+ * never touched. Returns the draft's id and version.
+ */
+export async function saveGuideDraft(
+  workspaceId: string,
+  input: {
+    rules: unknown;
+    selectionMode: "top_n" | "minimum_score" | "both";
+    shortlistTarget: number | null;
+    minimumScore: number | null;
+    contentHash: string;
+    criteria: GuideCriterion[];
+  },
+): Promise<{ guideVersionId: string; version: number }> {
+  return withPilotTransaction(async (tx) => {
+    const [draft] = await tx<{ id: string; version: number }[]>`
+      SELECT id, version FROM netzero.guide_versions
+       WHERE workspace_id = ${workspaceId} AND status = 'draft'
+       ORDER BY version DESC LIMIT 1`;
+    let guideVersionId: string;
+    let version: number;
+    if (draft) {
+      guideVersionId = draft.id;
+      version = draft.version;
+      await tx`
+        UPDATE netzero.guide_versions SET
+          rules = ${tx.json(JSON.parse(JSON.stringify(input.rules)))},
+          selection_mode = ${input.selectionMode},
+          shortlist_target = ${input.shortlistTarget},
+          minimum_score = ${input.minimumScore},
+          content_hash = ${input.contentHash}
+        WHERE id = ${guideVersionId}`;
+      await tx`DELETE FROM netzero.guide_criteria WHERE guide_version_id = ${guideVersionId}`;
+    } else {
+      const [{ next }] = await tx<{ next: number }[]>`
+        SELECT COALESCE(MAX(version), 0) + 1 AS next FROM netzero.guide_versions WHERE workspace_id = ${workspaceId}`;
+      version = next;
+      const [created] = await tx<{ id: string }[]>`
+        INSERT INTO netzero.guide_versions
+          (workspace_id, version, status, rules, selection_mode, shortlist_target, minimum_score, content_hash)
+        VALUES (${workspaceId}, ${version}, 'draft', ${tx.json(JSON.parse(JSON.stringify(input.rules)))},
+                ${input.selectionMode}, ${input.shortlistTarget}, ${input.minimumScore}, ${input.contentHash})
+        RETURNING id`;
+      guideVersionId = created.id;
+    }
+    for (const c of input.criteria) {
+      await tx`
+        INSERT INTO netzero.guide_criteria (guide_version_id, rule_id, title, weight, position)
+        VALUES (${guideVersionId}, ${c.ruleId}, ${c.title}, ${c.weight}, ${c.position})`;
+    }
+    return { guideVersionId, version };
+  });
+}
+
+/** Approves (and freezes) the draft guide. Criterion weights must total 100. */
+export async function approveGuide(
+  guideVersionId: string,
+  reviewerId: string,
+  sql: Sql = pilotSql(),
+): Promise<void> {
+  const [sum] = await sql<{ total: number }[]>`
+    SELECT COALESCE(SUM(weight), 0)::int AS total FROM netzero.guide_criteria
+     WHERE guide_version_id = ${guideVersionId}`;
+  if (sum.total !== 100) {
+    throw new Error(`Criterion weights must total 100 before approval (currently ${sum.total}).`);
+  }
+  const rows = await sql`
+    UPDATE netzero.guide_versions
+       SET status = 'approved', approved_by = ${reviewerId}, approved_at = now()
+     WHERE id = ${guideVersionId} AND status = 'draft'
+    RETURNING id`;
+  if (rows.length === 0) throw new Error("No draft guide to approve (already approved or missing).");
 }
 
 // ------------------------------------------------------------------- marks ---
