@@ -1,5 +1,27 @@
 {
   "version": "7",
-  "dialect": "sqlite",
-  "entries": []
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1784215532131,
+      "tag": "0000_production_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784218753509,
+      "tag": "0001_current_import_staging",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784221900000,
+      "tag": "0002_historical_import_staging",
+      "breakpoints": true
+    }
+  ]
 }

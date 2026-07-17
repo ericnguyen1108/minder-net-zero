@@ -6,17 +6,29 @@ import {
   getPhase4AssessmentProtocolHash,
 } from "../../phase4-protocol.ts";
 import { isSensitiveAssessmentHeading } from "../../assessment-safety.ts";
+import { localAuthBypassAllowed, requestIsAuthorized } from "../../auth.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-const DEFAULT_MODEL = "gpt-5.6-terra";
+// Fallback only. Production pins a real model via the OPENAI_MODEL deployment
+// secret; Phase 5 refuses to run unless the resolved model matches the one used
+// in the passed practice test, so this default is never silently substituted.
+const DEFAULT_MODEL = "gpt-4o";
 const MAX_REQUEST_BYTES = PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxRequestBytes;
 const MAX_TEACHING_ROWS = 12;
 const MAX_BLIND_CASES = PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxCases;
 const MAX_ANSWERS_PER_ROW = PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxAnswersPerRow;
 const MAX_ROW_TEXT_CHARS = PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxRowTextChars;
 const MAX_GUIDE_RULES = PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxGuideRules;
-const MAX_ATTEMPTS = 3;
-const UPSTREAM_TIMEOUT_MS = 25_000;
+/**
+ * One upstream attempt per invocation, sized to fit Vercel's function window
+ * (maxDuration 60s) with headroom for validation. Retries are client-driven:
+ * the browser run loop auto-retries transient failures with backoff, so a
+ * second in-function attempt would only risk a platform kill mid-response.
+ */
+const MAX_ATTEMPTS = 1;
+const UPSTREAM_TIMEOUT_MS = 50_000;
+
+export const maxDuration = 60;
 
 type RuleKind = "eligibility" | "elimination" | "criterion";
 type CanonicalOutcome =
@@ -214,7 +226,8 @@ const DISCOVER_PATTERNS_FORMAT = {
 } as const;
 
 export async function GET(request: Request) {
-  const accessError = checkAccess(request);
+  if (process.env.AUTH_MODE === "clerk") return productionEndpointUnavailable();
+  const accessError = await checkAccess(request);
   if (accessError) return accessError;
 
   const runtime = await getRuntimeEnv();
@@ -232,9 +245,50 @@ export async function GET(request: Request) {
   );
 }
 
+/**
+ * Per-instance sliding window over AI-backed requests. A legitimate run issues
+ * ~1-6 sequential requests per minute, so an honest organiser never sees this;
+ * it exists to stop a leaked session or script from burning the OpenAI budget.
+ * Localhost (dev and tests) is exempt.
+ */
+const AI_REQUEST_LIMIT = 30;
+const AI_REQUEST_WINDOW_MS = 60_000;
+const aiRequestCounts = new Map<string, { count: number; resetAtMs: number }>();
+
+function aiRateLimited(request: Request, nowMs: number): boolean {
+  // Exempt localhost via the routing Host header, consistent with auth — not
+  // request.url, whose host can be the bind address on some platforms (which
+  // would silently disable the limiter in production).
+  if (localAuthBypassAllowed(request.headers.get("host"))) return false;
+  const key =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-real-ip") ||
+    "unknown";
+  const entry = aiRequestCounts.get(key);
+  if (!entry || entry.resetAtMs <= nowMs) {
+    aiRequestCounts.set(key, { count: 1, resetAtMs: nowMs + AI_REQUEST_WINDOW_MS });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > AI_REQUEST_LIMIT;
+}
+
 export async function POST(request: Request) {
-  const accessError = checkAccess(request);
+  if (process.env.AUTH_MODE === "clerk") return productionEndpointUnavailable();
+  const accessError = await checkAccess(request);
   if (accessError) return accessError;
+
+  if (aiRateLimited(request, Date.now())) {
+    return json(
+      {
+        error: {
+          code: "rate_limited",
+          message: "Too many AI requests at once. Wait a minute, then resume the run.",
+        },
+      },
+      429,
+    );
+  }
 
   try {
     const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
@@ -350,24 +404,11 @@ export async function POST(request: Request) {
 }
 
 async function getRuntimeEnv(): Promise<RuntimeEnv> {
-  const nodeEnv: RuntimeEnv =
-    typeof process === "undefined"
-      ? {}
-      : {
-          OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-          OPENAI_MODEL: process.env.OPENAI_MODEL,
-        };
-  try {
-    const cloudflare = (await import("cloudflare:workers")) as unknown as {
-      env?: RuntimeEnv;
-    };
-    return {
-      OPENAI_API_KEY: nodeEnv.OPENAI_API_KEY ?? cloudflare.env?.OPENAI_API_KEY,
-      OPENAI_MODEL: nodeEnv.OPENAI_MODEL ?? cloudflare.env?.OPENAI_MODEL,
-    };
-  } catch {
-    return nodeEnv;
-  }
+  if (typeof process === "undefined") return {};
+  return {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENAI_MODEL: process.env.OPENAI_MODEL,
+  };
 }
 
 function json(value: unknown, status: number) {
@@ -380,7 +421,19 @@ function json(value: unknown, status: number) {
   });
 }
 
-function checkAccess(request: Request): Response | null {
+function productionEndpointUnavailable(): Response {
+  return json(
+    {
+      error: {
+        code: "legacy_assessment_disabled",
+        message: "The browser-only assessment endpoint is disabled for individual-account deployments.",
+      },
+    },
+    404,
+  );
+}
+
+async function checkAccess(request: Request): Promise<Response | null> {
   let url: URL;
   try {
     url = new URL(request.url);
@@ -417,30 +470,26 @@ function checkAccess(request: Request): Response | null {
     );
   }
 
-  if (isLocalHost(url.hostname)) return null;
-  if (!request.headers.get("oai-authenticated-user-email")?.trim()) {
+  const authorized = await requestIsAuthorized({
+    // Use ONLY the routing Host header (consistent with the page gate, which
+    // fails closed). request.url's host can reflect the bind address on some
+    // hosts, so a `?? url.host` fallback would reintroduce a localhost bypass.
+    hostHeader: request.headers.get("host"),
+    cookieHeader: request.headers.get("cookie"),
+    nowMs: Date.now(),
+  });
+  if (!authorized) {
     return json(
       {
         error: {
           code: "authentication_required",
-          message: "Sign in through the private Minder Net Zero site to continue.",
+          message: "Sign in to the private Minder Net Zero workspace to continue.",
         },
       },
       401,
     );
   }
   return null;
-}
-
-function isLocalHost(hostname: string) {
-  const normalized = hostname.toLowerCase();
-  return (
-    normalized === "localhost" ||
-    normalized.endsWith(".localhost") ||
-    normalized === "127.0.0.1" ||
-    normalized === "::1" ||
-    normalized === "[::1]"
-  );
 }
 
 async function readJsonBody(request: Request): Promise<unknown> {

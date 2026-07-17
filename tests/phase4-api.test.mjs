@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { GET, POST } from "../app/api/phase4/route.ts";
+import { createSessionToken } from "../app/auth.ts";
 import { getPhase4AssessmentProtocolHash } from "../app/phase4-protocol.ts";
 
 const guide = {
@@ -27,7 +28,12 @@ const guide = {
 };
 
 function localRequest(path = "/api/phase4", init = {}) {
-  return new Request(`http://localhost${path}`, init);
+  // A constructed Request carries no Host header; the app authorizes localhost
+  // by the Host header, so set it explicitly for these local bypass cases.
+  return new Request(`http://localhost${path}`, {
+    ...init,
+    headers: { host: "localhost", ...(init.headers ?? {}) },
+  });
 }
 
 test("reports a server-managed but unconfigured AI connection without exposing a key", async () => {
@@ -55,9 +61,40 @@ test("reports a server-managed but unconfigured AI connection without exposing a
   }
 });
 
-test("requires private-site authentication away from localhost", async () => {
+test("requires a valid session away from localhost; spoofed legacy headers do not count", async () => {
   const response = await GET(new Request("https://minder.example/api/phase4"));
   assert.equal(response.status, 401);
+
+  // The legacy ChatGPT-proxy header must no longer grant access: it is
+  // client-forgeable on any self-hosted deployment.
+  const forgedHeader = await GET(
+    new Request("https://minder.example/api/phase4", {
+      headers: { "oai-authenticated-user-email": "attacker@evil.example" },
+    }),
+  );
+  assert.equal(forgedHeader.status, 401);
+
+  const garbageCookie = await GET(
+    new Request("https://minder.example/api/phase4", {
+      headers: { cookie: "minder_session=v1.9999999999999.forged-signature" },
+    }),
+  );
+  assert.equal(garbageCookie.status, 401);
+
+  const previousSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = "phase4-api-test-secret";
+  try {
+    const token = await createSessionToken("phase4-api-test-secret", Date.now() + 60_000);
+    const authed = await GET(
+      new Request("https://minder.example/api/phase4", {
+        headers: { cookie: `minder_session=${token}` },
+      }),
+    );
+    assert.equal(authed.status, 200);
+  } finally {
+    if (previousSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = previousSecret;
+  }
 
   const previousFetch = globalThis.fetch;
   let upstreamCalls = 0;

@@ -63,7 +63,7 @@ const cases = [
 function localRequest(body, path = "/api/phase5") {
   return new Request(`http://localhost${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", host: "localhost" },
     body: JSON.stringify(body),
   });
 }
@@ -159,7 +159,7 @@ test("delegates connection state to the authenticated Phase 4 gateway", async ()
   const previous = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
-    const response = await GET(new Request("http://localhost/api/phase5"));
+    const response = await GET(new Request("http://localhost/api/phase5", { headers: { host: "localhost" } }));
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
       assessmentProtocolHash: await getPhase4AssessmentProtocolHash(),

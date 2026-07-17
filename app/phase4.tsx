@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildBlindSealedPayload,
   buildSafeTeachingPayload,
@@ -20,9 +20,11 @@ import {
 } from "./historical-data";
 import {
   createPhase4Session,
+  loadPhase4RecalibrationCredits,
   loadPhase4Session,
   mergePhase4Patterns,
   phase4SummaryFromSession,
+  resetPhase4SessionWithCredit,
   revealCommittedOutcomes,
   savePhase4Session,
   selectEvidenceReviewSampleIds,
@@ -280,7 +282,7 @@ function metricsMeetTargets(session: Phase4Session) {
     metrics.evidenceValidRate.value === 100 &&
     alignmentMetric.value !== null &&
     alignmentMetric.value >= policy.minimumHistoricalAlignment &&
-    metrics.progressedSafetyCapture.value === 100 &&
+    metrics.progressedSafetyCapture.value !== null &&
     metrics.progressedSafetyCapture.value >= policy.minimumProgressedCapture &&
     metrics.humanReviewRate.value !== null &&
     metrics.humanReviewRate.value <= policy.maximumHumanReviewRate
@@ -317,14 +319,32 @@ export function Phase4Workspace({
   const [minimumCapture, setMinimumCapture] = useState("100");
   const [maximumReview, setMaximumReview] = useState("");
   const [waitlistPolicy, setWaitlistPolicy] = useState<"exclude" | "not_progressed">("exclude");
+  const [recalibrationCredits, setRecalibrationCredits] = useState(0);
+  const [resetContext, setResetContext] = useState<{
+    binding: Awaited<ReturnType<typeof loadHistoricalDatasetBinding>>;
+    guideContentHash: string;
+  } | null>(null);
   const [evidenceReviewAnswers, setEvidenceReviewAnswers] = useState<
     Map<string, Phase4SourceRow["answers"]>
   >(new Map());
+
+  // The parent may pass a fresh onSummaryChange/guide identity on every render.
+  // Read them through refs so the mount effect below depends only on the values
+  // that should actually re-run it — otherwise its own onSummaryChange call
+  // re-renders the parent and the effect loops forever.
+  const onSummaryChangeRef = useRef(onSummaryChange);
+  const guideRef = useRef(guide);
+  useEffect(() => {
+    onSummaryChangeRef.current = onSummaryChange;
+    guideRef.current = guide;
+  });
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
+        const guide = guideRef.current;
+        const onSummaryChange = onSummaryChangeRef.current;
         const binding = await loadHistoricalDatasetBinding(datasetId);
         if (binding.guideVersion !== guide.version || guide.status !== "approved") {
           throw new Error("Phase 4 is locked because the approved guide and historical set do not match.");
@@ -338,6 +358,9 @@ export function Phase4Workspace({
           loaded = await createPhase4Session({ binding, guideContentHash });
           loaded = await savePhase4Session(loaded);
         }
+        if (cancelled) return;
+        setResetContext({ binding, guideContentHash });
+        setRecalibrationCredits(await loadPhase4RecalibrationCredits(binding.datasetFingerprint));
         if (cancelled) return;
         setSession(loaded);
         if (loaded.acceptancePolicy) {
@@ -356,7 +379,10 @@ export function Phase4Workspace({
     return () => {
       cancelled = true;
     };
-  }, [datasetId, guide, onSummaryChange]);
+    // guide and onSummaryChange are read via refs; the effect should re-run only
+    // when the dataset or the approved guide version changes (the parent also
+    // remounts this component on a version change).
+  }, [datasetId, guide.version]);
 
   async function checkConnection() {
     setConnection("checking");
@@ -464,6 +490,34 @@ export function Phase4Workspace({
     setSession(saved);
     onSummaryChange(phase4SummaryFromSession(saved));
     return saved;
+  }
+
+  async function recalibrateWithCredit() {
+    if (!resetContext || recalibrationCredits < 1 || busy) return;
+    if (
+      !window.confirm(
+        "Use your one recalibration retry to run the practice test again on this same historical file? The earlier reveal stays in the permanent record, and this retry is no longer strictly blind.",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const fresh = await resetPhase4SessionWithCredit(resetContext);
+      setRecalibrationCredits(await loadPhase4RecalibrationCredits(resetContext.binding.datasetFingerprint));
+      setMinimumAlignment("");
+      setMinimumCapture("100");
+      setMaximumReview("");
+      setWaitlistPolicy("exclude");
+      setSession(fresh);
+      setStep("test");
+      onSummaryChange(phase4SummaryFromSession(fresh));
+    } catch (resetError) {
+      setError(resetError instanceof Error ? resetError.message : "The recalibration retry could not start.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function generatePatterns() {
@@ -586,11 +640,14 @@ export function Phase4Workspace({
   async function lockPolicy() {
     if (!session || session.patternStatus !== "approved" || busy) return;
     const values = [minimumAlignment, minimumCapture, maximumReview].map(Number);
-    if (
-      values.some((value) => !Number.isInteger(value) || value < 0 || value > 100) ||
-      values[1] !== 100
-    ) {
+    if (values.some((value) => !Number.isInteger(value) || value < 0 || value > 100)) {
       setError("Enter a whole percentage from 0 to 100 for every pass rule.");
+      return;
+    }
+    if (values[1] < 90) {
+      setError(
+        "The previously-progressed capture floor cannot be set below 90%. Missing more than one in ten past successes is not a calibration worth trusting.",
+      );
       return;
     }
     if (
@@ -981,6 +1038,23 @@ export function Phase4Workspace({
                 <dl className="phase4-facts"><div><dt>Teaching guidance</dt><dd>{approvedPatterns} approved</dd></div><div><dt>Run state</dt><dd>{session.practiceStatus.replaceAll("_", " ")}</dd></div><div><dt>Predictions</dt><dd>{session.assessments.length}/{session.sealedRows}</dd></div></dl>
               </section>
 
+              {session.blindnessCompromised ? (
+                <div className="history-alert" role="status">
+                  <strong>This practice test is not strictly blind.</strong>
+                  <p>The historical outcomes for this file were revealed once before, and this recalibration was permitted because a supervised run failed its human evidence audit. The earlier reveal stays in the permanent record; treat this pass as a supervised-recalibration check, not a fresh blind result.</p>
+                </div>
+              ) : null}
+
+              {recalibrationCredits > 0 &&
+              (session.practiceStatus === "failed" ||
+                session.practiceStatus === "revealed" ||
+                session.practiceStatus === "passed") ? (
+                <div className="phase4-card phase4-recalibrate-card">
+                  <div><span className="section-kicker">Recalibration retry available</span><h3>Rerun the practice test on this same file</h3><p>A supervised run failed its evidence audit, so you have one retry on this historical set instead of needing a new one. Revise the Decision Guide or teaching guidance first if the failure pointed to a rule problem. The previous reveal is kept in the permanent record.</p></div>
+                  <button className="primary-button" type="button" disabled={busy} onClick={() => void recalibrateWithCredit()}>{busy ? "Starting retry…" : "Start recalibration retry"}</button>
+                </div>
+              ) : null}
+
               {session.practiceStatus === "not_started" ? (
                 <section className="phase4-card">
                   <span className="section-kicker">1 · Set pass rules</span>
@@ -989,7 +1063,7 @@ export function Phase4Workspace({
                   <div className="phase4-hard-rules"><strong>Fixed safety requirements</strong><ul><li>100% of numeric-score evidence must be an exact quote from the current answer.</li><li>Missing, conflicting or unsupported evidence goes to Human Review.</li><li>Every rule finding and score is locked before outcomes are revealed.</li><li>Top-N guides are tested by ranking agreement; the answer key never chooses a cutoff.</li><li>No automatic final rejection or shortlist.</li></ul></div>
                   <div className="phase4-policy-grid">
                     <label><span>{guide.selection.mode === "top_n" || guide.selection.mode === "both" ? "Minimum ranking agreement" : "Minimum overall historical alignment"}</span><div><input type="number" min="0" max="100" value={minimumAlignment} onChange={(event) => setMinimumAlignment(event.target.value)} /><em>%</em></div></label>
-                    <label><span>Previously progressed safely captured · fixed</span><div><input type="number" value={minimumCapture} disabled readOnly /><em>%</em></div></label>
+                    <label><span>Previously progressed safely captured · 90–100</span><div><input type="number" min={90} max={100} value={minimumCapture} disabled={busy} onChange={(event) => setMinimumCapture(event.target.value)} /><em>%</em></div><small>100% is strictest. Historical decisions are often noisy — judges sometimes disagreed with their own rubric — so a realistic floor (for example 95%) avoids failing the one-use test over a single arguable old case.</small></label>
                     <label><span>Maximum Human Review workload</span><div><input type="number" min="0" max="100" value={maximumReview} onChange={(event) => setMaximumReview(event.target.value)} /><em>%</em></div></label>
                     <label><span>Waitlist comparison</span><select value={waitlistPolicy} onChange={(event) => setWaitlistPolicy(event.target.value as "exclude" | "not_progressed")}><option value="exclude">Show separately; exclude</option><option value="not_progressed">Treat as did not progress</option></select></label>
                   </div>
@@ -1024,7 +1098,7 @@ export function Phase4Workspace({
                     {[
                       ["Exact evidence", session.metrics.evidenceValidRate, "100% required"],
                       ["Historical alignment", session.metrics.agreement, session.acceptancePolicy?.evaluationMode === "binary_alignment" ? `Target ≥ ${session.acceptancePolicy.minimumHistoricalAlignment}%` : "Diagnostic only"],
-                      ["Previously progressed safely captured", session.metrics.progressedSafetyCapture, "100% hard gate in this phase"],
+                      ["Previously progressed safely captured", session.metrics.progressedSafetyCapture, `Target ≥ ${session.acceptancePolicy?.minimumProgressedCapture ?? 100}%`],
                       ["Exact progressed alignment", session.metrics.progressedRecall, "Diagnostic only"],
                       ["Human Review", session.metrics.humanReviewRate, `Target ≤ ${session.acceptancePolicy?.maximumHumanReviewRate}%`],
                       ["Ranking agreement", session.metrics.pairwiseRankingConcordance, session.acceptancePolicy?.evaluationMode === "ranking_alignment" ? `Target ≥ ${session.acceptancePolicy.minimumHistoricalAlignment}%` : "Diagnostic only"],

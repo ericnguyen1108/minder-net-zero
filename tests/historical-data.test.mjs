@@ -16,15 +16,25 @@ import {
 import {
   createPhase4Session,
   contentHash,
+  grantPhase4RecalibrationCredit,
+  loadPhase4RecalibrationCredits,
   loadPhase4Session,
+  resetPhase4SessionWithCredit,
   revealCommittedOutcomes,
   savePhase4Session,
 } from "../app/phase4-storage.ts";
 import { buildSourceTable, parseDelimitedText } from "../app/historical-parser.ts";
+import { exportWorkspace, importWorkspace, parseWorkspaceBackup } from "../app/backup.ts";
 import { IDBKeyRange, indexedDB } from "fake-indexeddb";
 
 globalThis.indexedDB = indexedDB;
 globalThis.IDBKeyRange = IDBKeyRange;
+const localStorageStore = new Map();
+globalThis.localStorage = {
+  getItem: (key) => (localStorageStore.has(key) ? localStorageStore.get(key) : null),
+  setItem: (key, value) => { localStorageStore.set(key, String(value)); },
+  removeItem: (key) => { localStorageStore.delete(key); },
+};
 
 const columns = [
   { key: "id", label: "Application ID", index: 0 },
@@ -86,6 +96,30 @@ test("parses BOM, quoted commas, multiline CSV, TSV and preserves row numbers ac
     parseDelimitedText("ID\tTeam\tAnswer\tOutcome\n0007\tTeam Seven\tAnswer\tShortlisted\n"),
   );
   assert.equal(tsvTable.rows[0][tsvTable.columns[0].key], "0007");
+});
+
+test("de-duplicates headers without colliding with a real pre-existing label", () => {
+  const table = buildSourceTable("CSV", [
+    ["Name", "Name", "Name (2)"],
+    ["a", "b", "c"],
+  ]);
+  const labels = table.columns.map((column) => column.label);
+  assert.equal(new Set(labels).size, labels.length, "every emitted header label must be unique");
+  assert.deepEqual(labels, ["Name", "Name (2)", "Name (2) (2)"]);
+});
+
+test("rejects an oversized file with a clear error instead of crashing on a huge spread", () => {
+  const header = [["ID", "Answer"]];
+  const rows = Array.from({ length: 10_002 }, (_, index) => [`ID-${index}`, `Answer ${index}`]);
+  assert.throws(() => buildSourceTable("CSV", [...header, ...rows]), /accepts up to 10,000 rows/);
+});
+
+test("accepts exactly 10,000 real rows even with a trailing blank line", () => {
+  const header = [["ID", "Answer"]];
+  const rows = Array.from({ length: 10_000 }, (_, index) => [`ID-${index}`, `Answer ${index}`]);
+  const trailingBlank = [[""]]; // exporters commonly add a trailing newline
+  const table = buildSourceTable("CSV", [...header, ...rows, ...trailingBlank]);
+  assert.equal(table.rows.length, 10_000);
 });
 
 test("keeps question headings, preserves leading-zero IDs and never guesses outcomes", () => {
@@ -252,7 +286,7 @@ test("fails closed when stored assignments are changed without a new integrity s
   });
   await saveHistoricalDataset(dataset);
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -371,7 +405,7 @@ test("keeps sealed outcomes hidden until a complete prediction set is committed"
   assert.equal(revealed.practiceStatus, "revealed");
   assert.equal(revealed.outcomes.length, blind.length);
   const receiptDatabase = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -386,9 +420,13 @@ test("keeps sealed outcomes hidden until a complete prediction set is committed"
   receiptDatabase.close();
   assert.deepEqual(Object.keys(consumedReceipt).sort(), [
     "datasetFingerprint",
+    "revealCount",
     "revealedAt",
+    "revealsAllowed",
     "sessionId",
   ]);
+  assert.equal(consumedReceipt.revealsAllowed, 1);
+  assert.equal(consumedReceipt.revealCount, 1);
   const revealedAgain = await revealCommittedOutcomes(revealed);
   assert.equal(revealedAgain.revealedAt, revealed.revealedAt);
   assert.deepEqual(revealedAgain.outcomes, revealed.outcomes);
@@ -439,6 +477,163 @@ test("keeps sealed outcomes hidden until a complete prediction set is committed"
     /already been used for a revealed blind test/i,
   );
   await deleteHistoricalDataset(reimported.metadata.id);
+});
+
+async function driveSessionToRevealed(binding, blind, startSession) {
+  let session = startSession ?? (await createPhase4Session({ binding, guideContentHash: "guide-hash" }));
+  const assessments = blind.map((row) => ({
+    rowId: row.rowId,
+    eligibility: [],
+    elimination: [],
+    criteria: [],
+    weightedScore: null,
+    recommendation: "human_review",
+    evidenceValid: false,
+    humanReviewReasons: ["Explicit test abstention"],
+  }));
+  session = await savePhase4Session(session);
+  session = await savePhase4Session({
+    ...session,
+    modelId: "test-model",
+    patternStatus: "generating",
+    patternProcessedRows: binding.teachingRows,
+    patternProgress: 100,
+  });
+  session = await savePhase4Session({ ...session, patternStatus: "reviewing" });
+  session = await savePhase4Session({
+    ...session,
+    patternStatus: "approved",
+    teachingApprovedAt: new Date().toISOString(),
+    teachingApprovedBy: "Test organiser",
+  });
+  session = await savePhase4Session({
+    ...session,
+    practiceStatus: "policy_locked",
+    acceptancePolicy: {
+      evaluationMode: "binary_alignment",
+      minimumHistoricalAlignment: 80,
+      minimumProgressedCapture: 95,
+      maximumHumanReviewRate: 100,
+      waitlistPolicy: "exclude",
+      tieBreakPriority: [],
+      lockedAt: new Date().toISOString(),
+      lockedBy: "Test organiser",
+    },
+  });
+  session = await savePhase4Session({ ...session, practiceStatus: "running" });
+  session = await savePhase4Session({
+    ...session,
+    assessmentProtocolHash: "2".repeat(64),
+    assessments,
+  });
+  session = await savePhase4Session({
+    ...session,
+    practiceStatus: "predictions_committed",
+    predictionHash: await contentHash(assessments),
+  });
+  return revealCommittedOutcomes(session);
+}
+
+test("a failed Phase 5 audit grants exactly one recalibration retry on the same file", async () => {
+  const table = makeTable(makeRows(20, 20));
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "phase4-recalibration",
+    fileName: "recalibration.csv",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  await saveHistoricalDataset(dataset);
+  const binding = await loadHistoricalDatasetBinding(dataset.metadata.id);
+  const blind = await loadBlindPracticeRows(dataset.metadata.id);
+
+  const revealed = await driveSessionToRevealed(binding, blind);
+  assert.equal(revealed.practiceStatus, "revealed");
+
+  // Without a credit the file is consumed: no new session is allowed.
+  await assert.rejects(
+    createPhase4Session({ binding, guideContentHash: "guide-hash" }),
+    /already been used for a revealed blind test/i,
+  );
+
+  // A failed audit grants one retry (reveal budget +1); a credited reset is permitted and flagged.
+  assert.equal(await grantPhase4RecalibrationCredit(revealed.id), true);
+  assert.equal(await loadPhase4RecalibrationCredits(dataset.metadata.datasetFingerprint), 1);
+  const reset = await resetPhase4SessionWithCredit({ binding, guideContentHash: "guide-hash" });
+  assert.equal(reset.blindnessCompromised, true);
+  assert.equal(reset.practiceStatus, "not_started");
+  // The reveal budget is spent on the retry's REVEAL, not on the reset itself.
+  assert.equal(await loadPhase4RecalibrationCredits(dataset.metadata.datasetFingerprint), 1);
+
+  const retried = await driveSessionToRevealed(binding, blind, reset);
+  assert.equal(retried.practiceStatus, "revealed");
+  assert.equal(retried.blindnessCompromised, true);
+  assert.equal(await loadPhase4RecalibrationCredits(dataset.metadata.datasetFingerprint), 0);
+
+  // The budget is single-use: another reset without a fresh credit is blocked.
+  await assert.rejects(
+    resetPhase4SessionWithCredit({ binding, guideContentHash: "guide-hash" }),
+    /No recalibration retry is available/i,
+  );
+
+  // Granting a credit against a stale session id is a no-op.
+  assert.equal(await grantPhase4RecalibrationCredit("phase4-nonexistent-1"), false);
+
+  await deleteHistoricalDataset(dataset.metadata.id);
+});
+
+test("workspace restore cannot re-open a spent blind seal (reveal budget is durable)", async () => {
+  // Distinct row content → distinct content-based fingerprint, so this does not
+  // collide with the recalibration test's dataset in the shared fake-indexeddb.
+  const table = makeTable(makeRows(24, 24));
+  const prepared = prepareHistoricalDataset(table, mapping, outcomeMapping);
+  const dataset = await createSealedHistoricalDataset({
+    datasetId: "phase4-restore-exploit",
+    fileName: "restore.csv",
+    fileSize: 1000,
+    table,
+    guideVersion: 1,
+    mapping,
+    outcomeMapping,
+    prepared,
+  });
+  await saveHistoricalDataset(dataset);
+  const binding = await loadHistoricalDatasetBinding(dataset.metadata.id);
+  const blind = await loadBlindPracticeRows(dataset.metadata.id);
+
+  // Drive to committed-but-not-revealed, snapshot a backup here (receipt empty),
+  // then reveal the answer key once.
+  let session = await createPhase4Session({ binding, guideContentHash: "guide-hash" });
+  const assessments = blind.map((row) => ({
+    rowId: row.rowId, eligibility: [], elimination: [], criteria: [],
+    weightedScore: null, recommendation: "human_review", evidenceValid: false,
+    humanReviewReasons: ["Explicit test abstention"],
+  }));
+  session = await savePhase4Session(session);
+  session = await savePhase4Session({ ...session, modelId: "m", patternStatus: "generating", patternProcessedRows: binding.teachingRows, patternProgress: 100 });
+  session = await savePhase4Session({ ...session, patternStatus: "reviewing" });
+  session = await savePhase4Session({ ...session, patternStatus: "approved", teachingApprovedAt: new Date().toISOString(), teachingApprovedBy: "T" });
+  session = await savePhase4Session({ ...session, practiceStatus: "policy_locked", acceptancePolicy: { evaluationMode: "binary_alignment", minimumHistoricalAlignment: 80, minimumProgressedCapture: 95, maximumHumanReviewRate: 100, waitlistPolicy: "exclude", tieBreakPriority: [], lockedAt: new Date().toISOString(), lockedBy: "T" } });
+  session = await savePhase4Session({ ...session, practiceStatus: "running" });
+  session = await savePhase4Session({ ...session, assessmentProtocolHash: "3".repeat(64), assessments });
+  session = await savePhase4Session({ ...session, practiceStatus: "predictions_committed", predictionHash: await contentHash(assessments) });
+
+  const backupBeforeReveal = await exportWorkspace("2026-07-16T00:00:00.000Z");
+  const revealed = await revealCommittedOutcomes(session);
+  assert.equal(revealed.practiceStatus, "revealed");
+
+  // Restore the pre-reveal backup: session rolls back to committed, but the
+  // reveal receipt (union-merged, count preserved) must block a second reveal.
+  await importWorkspace(parseWorkspaceBackup(JSON.stringify(backupBeforeReveal)));
+  const rolledBack = await loadPhase4Session(dataset.metadata.id, 1);
+  assert.equal(rolledBack.practiceStatus, "predictions_committed");
+  await assert.rejects(revealCommittedOutcomes(rolledBack), /already revealed|changed/i);
+
+  await deleteHistoricalDataset(dataset.metadata.id);
 });
 
 test("requires enough positive and negative examples and distrusts missing storage summaries", () => {

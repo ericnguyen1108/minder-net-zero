@@ -11,19 +11,40 @@ function formatCell(value: unknown) {
 }
 
 function uniqueHeaderLabels(rawHeaders: unknown[]) {
-  const seen = new Map<string, number>();
+  // Locale-independent lower-casing keeps dedup keys stable regardless of the
+  // host's locale (e.g. the Turkish dotless-i). The taken-set guarantees the
+  // emitted label is globally unique, so a suffixed label can never collide
+  // with a real pre-existing column such as "Name (2)".
+  const taken = new Set<string>();
   return rawHeaders.map((header, index) => {
     const raw = formatCell(header).replace(/^\uFEFF/, "").trim();
     const base = raw || `Column ${index + 1}`;
-    const count = (seen.get(base.toLocaleLowerCase()) ?? 0) + 1;
-    seen.set(base.toLocaleLowerCase(), count);
-    return count === 1 ? base : `${base} (${count})`;
+    let candidate = base;
+    let count = 1;
+    while (taken.has(candidate.toLowerCase())) {
+      count += 1;
+      candidate = `${base} (${count})`;
+    }
+    taken.add(candidate.toLowerCase());
+    return candidate;
   });
 }
 
 export function buildSourceTable(sheetName: string, matrix: unknown[][]): SourceTable {
   if (matrix.length < 2) throw new Error("We found headings but no application rows.");
-  const width = Math.max(...matrix.map((row) => row.length));
+  // Coarse guard against pathological inputs (never spread a huge array into
+  // Math.max, which throws on ~100k+ elements). The exact row limit is enforced
+  // below on numberedRows, AFTER blank/trailing rows are filtered — so a normal
+  // trailing newline on a full 10,000-row file is not wrongly rejected here.
+  if (matrix.length - 1 > MAX_HISTORICAL_ROWS + 1) {
+    throw new Error(
+      `This preview accepts up to ${MAX_HISTORICAL_ROWS.toLocaleString()} rows in one file.`,
+    );
+  }
+  let width = 0;
+  for (const row of matrix) {
+    if (row.length > width) width = row.length;
+  }
   const labels = uniqueHeaderLabels(
     Array.from({ length: width }, (_, index) => matrix[0]?.[index] ?? ""),
   );

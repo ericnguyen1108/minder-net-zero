@@ -4,6 +4,7 @@ import {
   SEALED_STORE,
   loadHistoricalDatasetBinding,
   openDatabase,
+  transactionComplete,
 } from "./historical-data.ts";
 import type {
   CanonicalOutcome,
@@ -17,7 +18,36 @@ type Phase4ConsumedFingerprint = {
   datasetFingerprint: string;
   sessionId: string;
   revealedAt: string;
+  /**
+   * Durable reveal budget. `revealsAllowed` starts at 1 (the one blind reveal)
+   * and grows by 1 for each failed-audit recalibration credit; `revealCount` is
+   * how many reveals have happened. A reveal is permitted only while
+   * revealCount < revealsAllowed. These live on the receipt (not on session
+   * state) precisely so a workspace backup/restore cannot roll them back and
+   * re-open the seal. Legacy receipts without these fields count as one reveal
+   * already spent (revealsAllowed 1, revealCount 1).
+   */
+  revealsAllowed?: number;
+  revealCount?: number;
+  history?: Array<{ sessionId: string; revealedAt: string; note: string }>;
 };
+
+const DEFAULT_REVEALS_ALLOWED = 1;
+
+function receiptRevealsAllowed(receipt: Phase4ConsumedFingerprint | undefined): number {
+  return receipt?.revealsAllowed ?? DEFAULT_REVEALS_ALLOWED;
+}
+
+function receiptRevealCount(receipt: Phase4ConsumedFingerprint | undefined): number {
+  if (!receipt) return 0;
+  return receipt.revealCount ?? DEFAULT_REVEALS_ALLOWED;
+}
+
+/** Remaining sanctioned reveals (recalibration retries) on a receipt. */
+export function receiptRevealHeadroom(receipt: Phase4ConsumedFingerprint | undefined): number {
+  if (!receipt) return 0;
+  return Math.max(0, receiptRevealsAllowed(receipt) - receiptRevealCount(receipt));
+}
 
 export const PHASE4_PROMPT_VERSION = "phase4-calibration-v1";
 export const PHASE4_SCHEMA_VERSION = "phase4-output-v1";
@@ -126,6 +156,12 @@ export type Phase4Session = {
   evidenceReviewSampleIds: string[];
   evidenceReviewRowIds: string[];
   revealedAt: string | null;
+  /**
+   * True when this session was created with a recalibration credit after a
+   * failed Phase 5 evidence audit: the historical outcomes were revealed once
+   * before, so its practice test is no longer strictly blind.
+   */
+  blindnessCompromised?: boolean;
   finalDecisionAt: string | null;
   finalDecisionBy: string | null;
   updatedAt: string;
@@ -382,7 +418,12 @@ function sessionIsCoherent(session: Phase4Session) {
     Number.isInteger(policy.minimumHistoricalAlignment) &&
     policy.minimumHistoricalAlignment >= 0 &&
     policy.minimumHistoricalAlignment <= 100 &&
-    policy.minimumProgressedCapture === 100 &&
+    // Real historical decisions are noisy: past judges sometimes disagreed
+    // with their own rubric. The organiser chooses how many previously
+    // progressed cases the AI must re-capture, but never below 90%.
+    Number.isInteger(policy.minimumProgressedCapture) &&
+    policy.minimumProgressedCapture >= 90 &&
+    policy.minimumProgressedCapture <= 100 &&
     Number.isInteger(policy.maximumHumanReviewRate) &&
     policy.maximumHumanReviewRate >= 0 &&
     policy.maximumHumanReviewRate <= 100 &&
@@ -554,7 +595,8 @@ function metricsPassPolicy(metrics: PracticeMetrics, policy: PracticeAcceptanceP
       : metrics.agreement.value;
   return (
     metrics.evidenceValidRate.value === 100 &&
-    metrics.progressedSafetyCapture.value === 100 &&
+    metrics.progressedSafetyCapture.value !== null &&
+    metrics.progressedSafetyCapture.value >= policy.minimumProgressedCapture &&
     alignment !== null &&
     alignment >= policy.minimumHistoricalAlignment &&
     metrics.humanReviewRate.value !== null &&
@@ -887,6 +929,19 @@ export async function createPhase4Session(args: {
   } finally {
     database.close();
   }
+  return pristinePhase4Session(binding, args.guideContentHash, now, false);
+}
+
+/**
+ * Builds a fresh, pristine session for a dataset. `blindnessCompromised` marks
+ * a recalibration retry whose historical outcomes were revealed once before.
+ */
+function pristinePhase4Session(
+  binding: HistoricalDatasetBinding,
+  guideContentHash: string,
+  now: string,
+  blindnessCompromised: boolean,
+): Phase4Session {
   return {
     id: phase4SessionId(binding.datasetId, binding.guideVersion),
     schemaVersion: 1,
@@ -895,7 +950,7 @@ export async function createPhase4Session(args: {
     datasetFingerprint: binding.datasetFingerprint,
     datasetIntegrityHash: binding.integrityHash,
     guideVersion: binding.guideVersion,
-    guideContentHash: args.guideContentHash,
+    guideContentHash,
     teachingRows: binding.teachingRows,
     sealedRows: binding.sealedRows,
     promptVersion: PHASE4_PROMPT_VERSION,
@@ -919,10 +974,146 @@ export async function createPhase4Session(args: {
     evidenceReviewSampleIds: [],
     evidenceReviewRowIds: [],
     revealedAt: null,
+    ...(blindnessCompromised ? { blindnessCompromised: true } : {}),
     finalDecisionAt: null,
     finalDecisionBy: null,
     updatedAt: now,
   };
+}
+
+/**
+ * Grants one recalibration retry on the one-use receipt behind a Phase 4
+ * session — called when a Phase 5 run fails its human evidence audit, so the
+ * organiser can recalibrate on the same historical file instead of being
+ * forced to source a new one. Raises the durable reveal budget by one. Returns
+ * false (no-op) when the receipt does not belong to that session.
+ */
+export async function grantPhase4RecalibrationCredit(
+  phase4SessionId: string,
+): Promise<boolean> {
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction(
+      [PHASE4_STORE, PHASE4_CONSUMED_STORE],
+      "readwrite",
+    );
+    const session = await requestResult(
+      transaction.objectStore(PHASE4_STORE).get(phase4SessionId) as IDBRequest<
+        Phase4Session | undefined
+      >,
+    );
+    if (!session) return false;
+    const consumedStore = transaction.objectStore(PHASE4_CONSUMED_STORE);
+    const consumed = await requestResult(
+      consumedStore.get(session.datasetFingerprint) as IDBRequest<
+        Phase4ConsumedFingerprint | undefined
+      >,
+    );
+    if (!consumed || consumed.sessionId !== phase4SessionId) return false;
+    consumedStore.put({
+      ...consumed,
+      revealsAllowed: receiptRevealsAllowed(consumed) + 1,
+      revealCount: receiptRevealCount(consumed),
+    } satisfies Phase4ConsumedFingerprint);
+    await transactionComplete(transaction);
+    return true;
+  } finally {
+    database.close();
+  }
+}
+
+/** How many recalibration retries are currently available for a dataset. */
+export async function loadPhase4RecalibrationCredits(
+  datasetFingerprint: string,
+): Promise<number> {
+  const database = await openDatabase();
+  try {
+    const consumed = await requestResult(
+      database
+        .transaction(PHASE4_CONSUMED_STORE, "readonly")
+        .objectStore(PHASE4_CONSUMED_STORE)
+        .get(datasetFingerprint) as IDBRequest<Phase4ConsumedFingerprint | undefined>,
+    );
+    return receiptRevealHeadroom(consumed);
+  } finally {
+    database.close();
+  }
+}
+
+/**
+ * Resets a consumed session to a fresh pristine one using one recalibration
+ * credit, in a single transaction. Because Phase 4 session ids are
+ * deterministic per (dataset, guide version), this overwrites the old revealed
+ * session that shares the id — the sanctioned exception to the reversal guard.
+ * The receipt is re-pointed and the credit spent; the earlier reveal is
+ * preserved in the receipt history.
+ */
+export async function resetPhase4SessionWithCredit(args: {
+  binding: HistoricalDatasetBinding;
+  guideContentHash: string;
+}): Promise<Phase4Session> {
+  const { binding } = args;
+  const fresh = pristinePhase4Session(
+    binding,
+    args.guideContentHash,
+    new Date().toISOString(),
+    true,
+  );
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction(
+      [PHASE4_STORE, PHASE4_CONSUMED_STORE],
+      "readwrite",
+    );
+    const store = transaction.objectStore(PHASE4_STORE);
+    const consumedStore = transaction.objectStore(PHASE4_CONSUMED_STORE);
+    const existing = await requestResult(
+      store.get(fresh.id) as IDBRequest<Phase4Session | undefined>,
+    );
+    const consumed = await requestResult(
+      consumedStore.get(binding.datasetFingerprint) as IDBRequest<
+        Phase4ConsumedFingerprint | undefined
+      >,
+    );
+    if (
+      !consumed ||
+      receiptRevealHeadroom(consumed) < 1 ||
+      !existing ||
+      existing.id !== fresh.id ||
+      (existing.practiceStatus !== "revealed" &&
+        existing.practiceStatus !== "passed" &&
+        existing.practiceStatus !== "failed")
+    ) {
+      transaction.abort();
+      throw new Error("No recalibration retry is available for this historical set.");
+    }
+    if (!sessionIsCoherent(fresh)) {
+      transaction.abort();
+      throw new Error("The recalibration reset failed its integrity checks.");
+    }
+    store.put(fresh);
+    // Re-point the receipt at the fresh session but preserve the reveal budget
+    // and count: the retry's own reveal will spend one unit of headroom.
+    consumedStore.put({
+      datasetFingerprint: consumed.datasetFingerprint,
+      sessionId: fresh.id,
+      revealedAt: consumed.revealedAt,
+      revealsAllowed: receiptRevealsAllowed(consumed),
+      revealCount: receiptRevealCount(consumed),
+      history: [
+        ...(consumed.history ?? []),
+        {
+          sessionId: consumed.sessionId,
+          revealedAt: consumed.revealedAt,
+          note: "superseded_after_phase5_audit_failure",
+        },
+      ],
+    } satisfies Phase4ConsumedFingerprint);
+    await transactionComplete(transaction);
+    return fresh;
+  } finally {
+    database.close();
+  }
 }
 
 export async function revealCommittedOutcomes(session: Phase4Session) {
@@ -988,8 +1179,16 @@ export async function revealCommittedOutcomes(session: Phase4Session) {
           result = persisted;
           return;
         }
+        // Reveal is gated on the durable receipt budget, never on session
+        // state alone: a backup/restore can roll a session back to
+        // predictions_committed while the receipt (preserved on restore) still
+        // records the reveal. A second reveal is allowed only when the receipt
+        // names THIS session AND has unspent budget (a genuine credited retry).
+        const revealBudgetSpent = consumed
+          ? consumed.sessionId !== persisted?.id || receiptRevealHeadroom(consumed) < 1
+          : false;
         if (
-          consumed ||
+          revealBudgetSpent ||
           !persisted ||
           persisted.revision !== current.revision ||
           !sameValue(persisted, current) ||
@@ -1036,6 +1235,9 @@ export async function revealCommittedOutcomes(session: Phase4Session) {
           datasetFingerprint: revealed.datasetFingerprint,
           sessionId: revealed.id,
           revealedAt,
+          revealsAllowed: receiptRevealsAllowed(consumed),
+          revealCount: receiptRevealCount(consumed) + 1,
+          ...(consumed?.history?.length ? { history: consumed.history } : {}),
         } satisfies Phase4ConsumedFingerprint);
         result = revealed;
       };

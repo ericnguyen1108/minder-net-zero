@@ -1,36 +1,60 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
-async function render() {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
 
-  return worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html", host: "localhost" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
+/** Boots the production build (`next start`) and fetches the rendered page. */
+async function renderProductionHomepage() {
+  const port = await freePort();
+  const child = spawn(
+    process.execPath,
+    ["node_modules/next/dist/bin/next", "start", "--port", String(port)],
+    { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "production" } },
   );
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    const deadline = Date.now() + 30_000;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/`, {
+          headers: { accept: "text/html" },
+        });
+        return { response, html: await response.text() };
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    throw new Error(`next start did not become ready: ${lastError}\n${output}`);
+  } finally {
+    child.kill("SIGTERM");
+  }
 }
 
 test("server-renders the Minder Net Zero setup experience", async () => {
-  const response = await render();
+  const { response, html } = await renderProductionHomepage();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
-  const html = await response.text();
   assert.match(html, /<title>Minder Net Zero<\/title>/i);
   assert.match(html, /Competition setup/);
   assert.match(html, /Prepare a trustworthy assessment/);
@@ -66,16 +90,17 @@ test("removes starter assets and keeps the safety language", async () => {
   assert.match(historyData, /did not pass its integrity check/);
   assert.doesNotMatch(`${historyImport}\n${historyData}\n${historyParser}`, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
   assert.match(layout, /fair, evidence-backed application review/i);
-  assert.doesNotMatch(packageJson, /react-loading-skeleton|site-creator-vinext-starter/);
+  assert.doesNotMatch(packageJson, /react-loading-skeleton|site-creator-vinext-starter|vinext|wrangler|cloudflare/);
 
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
+  await assert.rejects(access(new URL("../worker/index.ts", import.meta.url)));
+  await assert.rejects(access(new URL("../.openai/hosting.json", import.meta.url)));
   await access(new URL("../public/og.png", import.meta.url));
-  await access(new URL("../.openai/hosting.json", import.meta.url));
   await access(root);
 });
 
-test("implements Phase 5 while keeping final decisions and exports locked", async () => {
-  const [page, phase4, storage, phase5, phase5Storage, currentImport, currentData, phase5Api] = await Promise.all([
+test("implements Phase 5 assessment and Phase 6 human decisions with export", async () => {
+  const [page, phase4, storage, phase5, phase5Storage, currentImport, currentData, phase5Api, decisions] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4-storage.ts", import.meta.url), "utf8"),
@@ -84,6 +109,7 @@ test("implements Phase 5 while keeping final decisions and exports locked", asyn
     readFile(new URL("../app/current-import.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/current-data.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/phase5/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/phase6-decisions.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /disabled={!safeguardsApproved} onClick={openApplications}/);
@@ -126,7 +152,11 @@ test("implements Phase 5 while keeping final decisions and exports locked", asyn
   assert.match(currentImport, /Import corrected set as new/);
   assert.match(currentImport, /earlier sealed data and its failed assessment run remain immutable/);
   assert.match(currentImport, /if \(superseding\) onSupersededDataset\(\)/);
-  assert.match(phase5, /Final decisions and export unlock in Phase 6/);
+  assert.match(phase5, /Record the final decision for every application/);
+  assert.match(phase5, /Export results \(CSV\)/);
+  assert.match(phase5, /nothing is decided until you decide it/i);
+  assert.match(decisions, /formula-injection guard/i);
+  assert.match(decisions, /decidedBy/);
   assert.match(phase5Storage, /assessment results are immutable/i);
   assert.match(phase5Storage, /phase5AssessmentSetIsValid/);
   assert.match(currentData, /no candidate will be silently excluded/i);

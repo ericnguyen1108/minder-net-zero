@@ -107,7 +107,7 @@ function storedAssessment(runId, rowId, score) {
 
 async function overwriteStoredRun(run) {
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -344,7 +344,7 @@ test("detects result tampering after the assessment-set receipt is frozen", asyn
   });
 
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });

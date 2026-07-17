@@ -6,7 +6,7 @@ import {
   openDatabase,
   transactionComplete,
 } from "./historical-data.ts";
-import { contentHash } from "./phase4-storage.ts";
+import { contentHash, grantPhase4RecalibrationCredit } from "./phase4-storage.ts";
 import type { Phase4Session } from "./phase4-storage.ts";
 import { createPhase4InputFingerprint, stableStringify } from "./phase4-logic.ts";
 import { getPhase4AssessmentProtocolHash } from "./phase4-protocol.ts";
@@ -1023,6 +1023,14 @@ export async function invalidatePhase5Run(args: {
     }
     store.put(updated);
     await transactionComplete(transaction);
+    // A failed human audit earns one recalibration credit so the organiser can
+    // rerun the practice test on the same historical file. Non-fatal: the
+    // invalidation above is already durable.
+    try {
+      await grantPhase4RecalibrationCredit(updated.contract.phase4SessionId);
+    } catch {
+      // The credit can be granted later by support; never mask the audit result.
+    }
     return updated;
   } finally {
     database.close();

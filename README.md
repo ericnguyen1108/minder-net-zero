@@ -1,42 +1,79 @@
 # Minder Net Zero
 
-Minder Net Zero is a guided application-review workspace for competition organisers who are not technical. It helps organisers define an approved decision guide, teach Minder from historical decisions, test the assessment safely, import current applications, and keep final decisions with people.
+Minder Net Zero is a guided competition-review platform for organisers who are not technical. It keeps the rubric, applications, reviewer work, final decisions, and audit history in one accountable workflow. Minder may support a recommendation; authorised people make every final decision.
 
 ## Product rules
 
-- Minder makes recommendations; authorised people make final decisions.
-- Applicant claims must be supported by evidence from the submitted text.
-- Missing information is never guessed.
-- Unclear, conflicting, or borderline cases go to human review.
-- Historical patterns do not become rules until an organiser approves them.
-- Rule changes create a new version and do not silently change old results.
+- Use only evidence in the submitted text; never invent missing information.
+- Send unclear, conflicting, or borderline cases to a person.
+- Historical patterns never become rules until an organiser approves them.
+- Rule changes create a new version and never silently rewrite old work.
+- Applicant identity stays separate from assessable answer text.
 
-## Delivery phases
+## Two modes — do not mix them
 
-1. Guided setup journey and approval gates
-2. Decision Guide builder and version approval
-3. Historical data import and validation
-4. Decision-guide learning and practice testing
-5. Evidence-bound batch assessment
-6. Human review, exports, roles, secure persistence, and managed AI operation
+| Mode | How it is enabled | Intended use | Data model |
+| --- | --- | --- | --- |
+| **Production platform** | Both `AUTH_MODE=clerk` and `NEXT_PUBLIC_AUTH_MODE=clerk` | Named organiser and reviewer accounts | Shared Postgres data, role checks, revision history, and central audit |
+| **Legacy pilot** | Any other setting | Local development and supervised, de-identified experiments only | Shared password plus browser-local IndexedDB/local state |
 
-## Current phase
+Production mode currently supports:
 
-Phases 1–5 are implemented. The app now includes the eight-step organiser journey, an approved and versioned Decision Guide, a guided historical-data importer, organiser-reviewed teaching patterns, a one-use blind practice test, locked operating safeguards, current-application reconciliation, and resumable evidence-bound assessment.
+- Clerk Organizations, invitations, required MFA, and separate owner, competition-admin, rubric-manager, reviewer, decision-approver, and auditor roles.
+- A central, versioned Decision Guide.
+- A central current-application import, with identity separated from answer text.
+- Reviewer assignment, independent review revisions, human decision revisions, guarded CSV export, and a central audit log.
+- Tenant-scoped Postgres access enforced by server authorization and forced row-level security.
 
-Historical application text is kept out of `localStorage` and stored in separate teaching and sealed-test IndexedDB stores. Phase 4 sends only allow-listed pseudonymous row IDs and mapped answers through a server gateway. Separate identity columns are excluded, but names or contact details embedded inside an answer are not automatically redacted. Teaching requests may include historical outcomes; blind practice requests never include them. Every AI result uses a strict output schema, and every quotation is rechecked against the exact current answer before the app calculates a weighted score locally. Because exact text can still be irrelevant, an organiser must also approve a fixed human evidence sample before the run can pass.
+Legacy mode contains the earlier guided historical-calibration and Phase 4/5 AI prototype. Its data and approvals live in one browser and are not shared with production accounts.
 
-Sealed outcomes are unavailable until a complete prediction set is durably committed. Revealing them creates a minimal, permanent browser receipt keyed by the historical-set fingerprint, so deleting and re-importing the same file cannot make it blind again. State changes are monotonic and revision-checked to stop stale tabs or unsafe reversals.
+## Honest production boundary
 
-Phase 5 freezes one complete current-application set and refuses missing, duplicate, conflicting or oversized rows rather than silently excluding a candidate. Application identity is stored separately from answer text. The AI receives only opaque case IDs, the approved answer fields, the approved guide and organiser-approved historical context. Requests are contract-bound, limited to six cases, resumable, and rejected if the guide, data, model, prompt, schema or evidence does not match. The exact assessment instructions, schema and validation protocol are hashed into the practice-test, safeguard and run receipts; a changed protocol cannot reuse the old approval.
+The following are **not yet production-backed workflows**:
 
-Scores and shortlist-zone rankings are calculated locally only after every case is accounted for. Unsupported, unclear and malformed cases go to Human Review; exact shortlist-boundary ties go to people. A fixed human evidence-relevance sample shows every evidence-bearing finding and quotation before it can pass. Failed audit runs remain immutable, identical retries are blocked, and corrected source data creates a separate sealed set without deleting the old audit record. Final decisions and exports remain locked for Phase 6.
+- Central historical-example import and calibration.
+- Central practice-test/safeguard approval.
+- Central AI assessment execution, result persistence, retry operations, or cost monitoring.
 
-This remains a test-data-only prototype. Browser storage is device-local and evictable, and the app still has no shared managed candidate database, role-based reviewer assignment, production audit service or backup. Do not use real candidate data until those controls are added. Phase 5 permits only a supervised, de-identified pilot; it does not enable autonomous decisions.
+The database schema and dashboard contain foundations for future historical and assessment records, but that does not make those workflows operational. Do not route real candidate text to an AI model from the production platform until central calibration, assessment persistence, privacy review, operational controls, and acceptance tests have been implemented and approved.
 
-## Managed AI connection
+The existing Phase 4/5 gateway is a legacy pilot: it calls the OpenAI Responses API server-side with structured output and `store: false`, then keeps workflow state in the browser. It is not model training or fine-tuning, and it is not the shared production assessment system. `OPENAI_API_KEY` and `OPENAI_MODEL` are therefore not required for the current production platform and should remain unset there.
 
-The organiser interface never asks for an API key. A Minder administrator provisions `OPENAI_API_KEY` and pins `OPENAI_MODEL` as server-side deployment secrets. Without them, Phases 4 and 5 fail closed and accurately report that no application text has been sent. The app uses the OpenAI Responses API with structured outputs and `store: false`; retention still depends on the organisation’s OpenAI project and data-control settings. Phase 5 requires the exact model used in the passed practice test—no silent model substitution is accepted.
+The browser **Download backup / Restore** control also belongs only to legacy mode. It does not back up Postgres, Clerk, reviewer accounts, central audit history, or production decisions.
+
+## The 700-application cohort
+
+The central importer accepts 1–1,000 applications in one complete cohort and uploads at most 25 rows per verified chunk. It rejects duplicate IDs, mismatched counts/hashes, oversized data, and partial finalisation; successful publish is atomic and audited. A 700-row import therefore uses 28 chunks.
+
+Those limits and automated regression tests are safety checks, not proof of production performance. Before go-live, the operator must run the documented synthetic 700-row rehearsal in an isolated, production-shaped staging environment, record duration and errors, verify exactly 700 central records, and complete a sample assignment/review/decision/export cycle.
+
+## Production deployment
+
+The production platform requires Clerk, Neon/Postgres, and Vercel (or another Node host). Follow the [production operator runbook](docs/production-runbook.md) end to end. The organiser receives only the web address, their named account, MFA recovery instructions, and a support contact—never infrastructure credentials or environment variables.
+
+Runtime deployment secrets:
+
+- `AUTH_MODE=clerk` and `NEXT_PUBLIC_AUTH_MODE=clerk`
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `CLERK_SECRET_KEY`
+- `CLERK_WEBHOOK_SIGNING_SECRET`
+- `DATABASE_URL` using the least-privilege `minder_runtime` role
+- `IDENTITY_DATABASE_URL` using the narrowly granted `minder_identity` role
+
+`DATABASE_ADMIN_URL` uses a third migration/administration role. It is operator-only and must never be deployed as a runtime variable. The same is true for `CLERK_ORGANIZATION_ID`, `CLERK_OWNER_USER_ID`, and the `MINDER_*` bootstrap confirmations. See [.env.example](.env.example) for the separated examples.
+
+Safe operator preflights:
+
+```bash
+npm run db:migrate -- --dry-run
+npm run platform:provision -- --dry-run
+```
+
+No real application may be imported until the runbook's region, privacy, Clerk invitation/MFA/webhook, least-privilege database, readiness, synthetic 700-row rehearsal, and restore-drill gates pass.
+
+## Legacy pilot deployment
+
+Legacy mode uses `ORGANISER_ACCESS_CODE`, `SESSION_SECRET`, and optional Upstash REST credentials for password changes. It is a single-workspace pilot, not a multi-user platform. Use test or deliberately de-identified data only; browser storage is device-local and evictable.
 
 ## Local development
 
@@ -44,8 +81,11 @@ The organiser interface never asks for an API key. A Minder administrator provis
 npm run dev
 ```
 
+The example environment defaults to legacy mode so a copied local file cannot accidentally pretend to be a production deployment. Production is an explicit two-variable cutover.
+
 ## Validation
 
 ```bash
+npm run lint
 npm test
 ```

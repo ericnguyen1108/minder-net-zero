@@ -6,6 +6,8 @@ import {
 import { getPhase4AssessmentProtocolHash } from "../../phase4-protocol.ts";
 import { isSensitiveAssessmentHeading } from "../../assessment-safety.ts";
 
+export const maxDuration = 60;
+
 export const PHASE5_PROMPT_VERSION = "phase5-current-assessment-v1";
 export const PHASE5_OUTPUT_SCHEMA_VERSION = "phase5-assessment-v1";
 export const PHASE5_BATCH_ALGORITHM = "opaque-row-order-byte-pack-v1";
@@ -314,7 +316,9 @@ export async function POST(request: Request) {
 
 function forwardedHeaders(source: Headers) {
   const headers = new Headers({ "content-type": "application/json" });
-  ["oai-authenticated-user-email", "origin", "sec-fetch-site"].forEach((name) => {
+  // `host` must be forwarded: the phase4 gateway authorizes localhost by the
+  // Host header, so an internal forward that dropped it would fail its own auth.
+  ["host", "cookie", "origin", "sec-fetch-site", "x-forwarded-for", "x-real-ip"].forEach((name) => {
     const value = source.get(name);
     if (value) headers.set(name, value);
   });

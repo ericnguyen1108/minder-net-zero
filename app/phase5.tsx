@@ -51,6 +51,16 @@ import type {
   Phase5SafeguardId,
   Phase5StoredAssessment,
 } from "./phase5-storage";
+import {
+  FINAL_DECISION_VALUES,
+  buildResultsCsv,
+  clearFinalDecision,
+  loadFinalDecisions,
+  resultsFileName,
+  saveFinalDecision,
+  sortResultsForExport,
+} from "./phase6-decisions";
+import type { FinalDecision, FinalDecisionValue, ResultsExportRow } from "./phase6-decisions";
 
 type FullGuideRule = Phase4ApprovedGuide["rules"][number] & {
   sourceNote: string;
@@ -158,23 +168,61 @@ function approvedPatternSnapshot(phase4: Phase4Session) {
     .sort((left, right) => left.id.localeCompare(right.id));
 }
 
+type Phase5ApiError = Error & { transient?: boolean };
+
 async function phase5Api(payload: unknown) {
-  const response = await fetch("/api/phase5", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/phase5", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    const networkError: Phase5ApiError = new Error(
+      "Could not reach the assessment service. Saved batches are unchanged.",
+    );
+    networkError.transient = true;
+    throw networkError;
+  }
   const body = (await response.json().catch(() => null)) as unknown;
   if (!response.ok) {
     const errorBody = record(record(body)?.error);
-    throw new Error(
+    const apiError: Phase5ApiError = new Error(
       stringValue(errorBody?.message) ||
         "Assessment paused safely. Saved batches are unchanged; try again later.",
     );
+    // Upstream hiccups (timeouts, rate limits, 5xx) are worth retrying
+    // automatically; contract or validation failures are not.
+    apiError.transient = response.status === 429 || response.status >= 500;
+    throw apiError;
   }
   const source = record(body);
   if (!source) throw new Error("The managed AI service returned an unreadable response.");
   return source;
+}
+
+const TRANSIENT_RETRY_LIMIT = 3;
+const TRANSIENT_RETRY_DELAYS_MS = [4_000, 10_000, 20_000];
+
+async function phase5ApiWithRetry(
+  payload: unknown,
+  onRetryNotice: (message: string) => void,
+  shouldStop: () => boolean,
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await phase5Api(payload);
+    } catch (error) {
+      const transient = Boolean((error as Phase5ApiError)?.transient);
+      if (!transient || attempt >= TRANSIENT_RETRY_LIMIT || shouldStop()) throw error;
+      const delayMs = TRANSIENT_RETRY_DELAYS_MS[attempt] ?? 20_000;
+      onRetryNotice(
+        `Temporary AI service problem. Retrying automatically (attempt ${attempt + 2} of ${TRANSIENT_RETRY_LIMIT + 1})…`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
 }
 
 export function SafeguardsWorkspace({
@@ -263,6 +311,8 @@ export function AssessmentWorkspace({
   guide,
   phase4,
   safeguards,
+  organiserName,
+  competitionName,
   onRunChange,
   onBack,
   onRecalibrate,
@@ -271,6 +321,8 @@ export function AssessmentWorkspace({
   guide: Phase5FullGuide;
   phase4: Phase4Session;
   safeguards: Phase5SafeguardApproval;
+  organiserName: string;
+  competitionName: string;
   onRunChange: (run: Phase5Run | null) => void;
   onBack: () => void;
   onRecalibrate: () => void;
@@ -283,8 +335,10 @@ export function AssessmentWorkspace({
   const [initializing, setInitializing] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [retryNotice, setRetryNotice] = useState("");
   const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
   const [preservedInvalidReceipt, setPreservedInvalidReceipt] = useState("");
+  const [decisions, setDecisions] = useState<FinalDecision[]>([]);
   const pauseRequested = useRef(false);
 
   const identityById = useMemo(
@@ -352,6 +406,7 @@ export function AssessmentWorkspace({
           setRun(loadedRun);
           onRunChange(loadedRun);
           setAssessments(loadedAssessments);
+          setDecisions(await loadFinalDecisions(loadedRun.id));
         }
         setInitializing(false);
       })
@@ -478,6 +533,7 @@ export function AssessmentWorkspace({
     if (busy || connection !== "connected" || cases.length === 0 || run?.status === "invalid") return;
     setBusy(true);
     setError("");
+    setRetryNotice("");
     pauseRequested.current = false;
     let working = run;
     let claimed: Awaited<ReturnType<typeof claimNextPhase5Batch>> = null;
@@ -509,17 +565,22 @@ export function AssessmentWorkspace({
         if (batchCases.length !== claimed.batch.rowIds.length) {
           throw new Error("A fixed batch refers to an application that is no longer available.");
         }
-        const body = await phase5Api({
-          action: "assess_current_cases",
-          run: working.contract,
-          batch: {
-            batchId: claimed.batch.batchId,
-            batchInputHash: claimed.batch.batchInputHash,
+        const body = await phase5ApiWithRetry(
+          {
+            action: "assess_current_cases",
+            run: working.contract,
+            batch: {
+              batchId: claimed.batch.batchId,
+              batchInputHash: claimed.batch.batchInputHash,
+            },
+            guide,
+            approvedPatterns: patterns,
+            cases: batchCases,
           },
-          guide,
-          approvedPatterns: patterns,
-          cases: batchCases,
-        });
+          setRetryNotice,
+          () => pauseRequested.current,
+        );
+        setRetryNotice("");
         if (
           body.runId !== working.id ||
           body.contractHash !== working.contract.contractHash ||
@@ -582,6 +643,7 @@ export function AssessmentWorkspace({
           // The original error is more useful. A stale tab is detected on reload.
         }
       }
+      setRetryNotice("");
       setError(message);
     } finally {
       setBusy(false);
@@ -673,10 +735,66 @@ export function AssessmentWorkspace({
     run?.cohortRecommendations.forEach((item) => { counts[item.recommendation] += 1; });
     return counts;
   }, [run?.cohortRecommendations]);
-  const humanReviewItems = useMemo(
-    () => run?.cohortRecommendations.filter((item) => item.recommendation === "human_review").slice(0, 12) ?? [],
-    [run?.cohortRecommendations],
+  const decisionByRowId = useMemo(
+    () => new Map(decisions.map((decision) => [decision.rowId, decision])),
+    [decisions],
   );
+  const decisionCounts = useMemo(() => {
+    const counts = { shortlist: 0, reject: 0, waitlist: 0 };
+    decisions.forEach((decision) => { counts[decision.decision] += 1; });
+    return counts;
+  }, [decisions]);
+  const orderedResults = useMemo(() => {
+    if (!run) return [] as ResultsExportRow[];
+    return sortResultsForExport(
+      run.cohortRecommendations.map((recommendation) => ({
+        recommendation,
+        identity: identityById.get(recommendation.rowId) ?? null,
+        assessment: assessmentById.get(recommendation.rowId) ?? null,
+        decision: decisionByRowId.get(recommendation.rowId) ?? null,
+      })),
+    );
+  }, [run, identityById, assessmentById, decisionByRowId]);
+
+  async function recordDecision(rowId: string, value: FinalDecisionValue | "") {
+    if (!run || run.status !== "ready_for_human_review") return;
+    setError("");
+    try {
+      if (value === "") {
+        await clearFinalDecision(run.id, rowId);
+        setDecisions((current) => current.filter((decision) => decision.rowId !== rowId));
+        return;
+      }
+      const decision: FinalDecision = {
+        runId: run.id,
+        rowId,
+        decision: value,
+        decidedBy: organiserName,
+        decidedAt: new Date().toISOString(),
+      };
+      await saveFinalDecision(decision);
+      setDecisions((current) => [
+        ...current.filter((existing) => existing.rowId !== rowId),
+        decision,
+      ]);
+    } catch (decisionError) {
+      setError(decisionError instanceof Error ? decisionError.message : "The decision was not saved.");
+    }
+  }
+
+  function exportResultsCsv() {
+    if (!run || run.status !== "ready_for_human_review") return;
+    const csv = buildResultsCsv(orderedResults);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = resultsFileName(competitionName, new Date().toISOString());
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="phase5-page">
@@ -686,6 +804,7 @@ export function AssessmentWorkspace({
         <span className={`phase4-status-badge ${run?.status === "ready_for_human_review" ? "safe" : run?.status === "invalid" ? "danger" : "warning"}`}>{run?.status.replaceAll("_", " ") ?? "Not started"}</span>
       </header>
       <section className="phase5-critical-warning"><strong>Supervised pilot only.</strong><p>Do not use live candidate data. Exact quotation checks reduce hallucination, but only a person can judge whether a quotation is relevant and whether the recommendation is fair.</p></section>
+      {retryNotice && !error ? <div className="phase5-retry-notice" role="status"><strong>Working</strong><span>{retryNotice}</span></div> : null}
       {error ? <div className="phase4-error" role="alert"><strong>Stopped safely</strong><span>{error}</span></div> : null}
       {run?.status === "invalid" ? <div className="phase4-error" role="alert"><strong>Run failed its human evidence audit</strong><span>{run.invalidReason}</span></div> : null}
       <div className="phase5-layout">
@@ -753,10 +872,43 @@ export function AssessmentWorkspace({
           </section> : null}
 
           {run?.status === "ready_for_human_review" ? <section className="phase5-card phase5-queue-card">
-            <div><span className="section-kicker">Provisional queue</span><h3>Recommendations are ready for full human review</h3><p>No team has been selected or rejected. Phase 6 will add assigned reviewers, decision reasons, final approval and export.</p></div>
+            <div><span className="section-kicker">Final human review</span><h3>Record the final decision for every application</h3><p>Minder&apos;s recommendations are provisional. An authorised person records each final decision; nothing is decided until you decide it. Human Review cases have no rank on purpose — read them first.</p></div>
             <div className="phase5-recommendation-grid"><div><span>Provisional shortlist zone</span><strong>{recommendationCounts.progressed}</strong></div><div><span>Outside provisional zone</span><strong>{recommendationCounts.not_progressed}</strong></div><div><span>Potentially ineligible</span><strong>{recommendationCounts.ineligible}</strong></div><div className="attention"><span>Human Review first</span><strong>{recommendationCounts.human_review}</strong></div></div>
-            {humanReviewItems.length ? <div className="phase4-case-list"><h4>First Human Review cases</h4>{humanReviewItems.map((item) => { const identity = identityById.get(item.rowId); return <article key={item.rowId}><div><strong>{identity?.teamName || identity?.externalId || "Application"}</strong><span>{identity?.externalId} · {identity?.track || "No track"}</span></div><small>{item.reason.replaceAll("_", " ")}</small></article>; })}</div> : <div className="phase4-approved-box"><strong>No AI-flagged Human Review cases</strong><span>People must still review every provisional recommendation before a final decision.</span></div>}
-            <button className="primary-button" type="button" disabled>Final decisions and export unlock in Phase 6</button>
+            <div className="phase5-decision-summary" role="status">
+              <strong>{decisions.length.toLocaleString()} of {run.cohortRecommendations.length.toLocaleString()} decided</strong>
+              <span>{decisionCounts.shortlist} shortlisted · {decisionCounts.waitlist} waitlisted · {decisionCounts.reject} rejected</span>
+              <button className="secondary-button" type="button" onClick={exportResultsCsv}>Export results (CSV)</button>
+            </div>
+            <div className="phase5-results-table-wrap">
+              <table className="phase5-results-table">
+                <thead><tr><th>Rank</th><th>Team</th><th>ID · Track</th><th>Score</th><th>Minder recommends</th><th>Why</th><th>Final decision</th></tr></thead>
+                <tbody>{orderedResults.map((row) => {
+                  const identity = row.identity;
+                  const decision = row.decision;
+                  const needsHuman = row.recommendation.recommendation === "human_review";
+                  return <tr className={needsHuman ? "phase5-row-review" : ""} key={row.recommendation.rowId}>
+                    <td>{row.recommendation.rank ?? "—"}</td>
+                    <td><strong>{identity?.teamName || identity?.externalId || "Application"}</strong></td>
+                    <td><small>{identity?.externalId}{identity?.track ? ` · ${identity.track}` : ""}</small></td>
+                    <td>{row.recommendation.weightedScore ?? "—"}</td>
+                    <td><span className={`phase5-reco phase5-reco-${row.recommendation.recommendation}`}>{row.recommendation.recommendation.replaceAll("_", " ")}</span></td>
+                    <td><small>{row.recommendation.reason.replaceAll("_", " ")}{row.assessment?.humanReviewReasons.length ? ` — ${row.assessment.humanReviewReasons[0]}` : ""}</small></td>
+                    <td>
+                      <select
+                        aria-label={`Final decision for ${identity?.teamName || row.recommendation.rowId}`}
+                        value={decision?.decision ?? ""}
+                        onChange={(event) => void recordDecision(row.recommendation.rowId, event.target.value as FinalDecisionValue | "")}
+                      >
+                        <option value="">Undecided</option>
+                        {FINAL_DECISION_VALUES.map((value) => <option key={value} value={value}>{value === "shortlist" ? "Shortlist" : value === "reject" ? "Reject" : "Waitlist"}</option>)}
+                      </select>
+                      {decision ? <small className="phase5-decided-by">{decision.decidedBy}</small> : null}
+                    </td>
+                  </tr>;
+                })}</tbody>
+              </table>
+            </div>
+            <p className="phase4-note">The CSV export includes every application with Minder&apos;s recommendation, its reason, and the recorded human decision — undecided rows export with an empty decision. Applicant-authored text is exported as text, never as spreadsheet formulas.</p>
           </section> : null}
         </main>
         <aside className="phase5-rail">

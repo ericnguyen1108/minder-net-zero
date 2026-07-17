@@ -162,8 +162,9 @@ export type SealedHistoricalDataset = {
 const DB_NAME = "minder-net-zero-private-v1";
 // Keep every organiser workflow in one database so upgrades are atomic. Phase 5
 // adds separate current-application identity/content stores and revisioned run
-// stores; historical data remains untouched during the migration.
-const DB_VERSION = 5;
+// stores; historical data remains untouched during the migration. Version 6
+// adds the final human-decision store for Phase 6.
+const DB_VERSION = 6;
 const DATASETS_STORE = "historical-datasets";
 const TEACHING_STORE = "historical-teaching";
 export const SEALED_STORE = "historical-sealed";
@@ -178,6 +179,7 @@ export const PHASE5_SAFEGUARDS_STORE = "phase5-safeguards";
 export const PHASE5_RUNS_STORE = "assessment-runs";
 export const PHASE5_BATCHES_STORE = "assessment-batches";
 export const PHASE5_RESULTS_STORE = "assessment-results";
+export const FINAL_DECISIONS_STORE = "final-decisions";
 
 function safeCount(value: unknown) {
   const count = Number(value);
@@ -228,7 +230,10 @@ export function normalizeHistoricalValue(value: string) {
 }
 
 export function historicalMatchKey(value: string) {
-  return normalizeHistoricalValue(value).replace(/\s+/g, " ").toLocaleLowerCase();
+  // Locale-independent: toLocaleLowerCase() would fold letters differently
+  // under, e.g., a Turkish locale, changing persisted integrity fingerprints
+  // and permanently locking a sealed dataset after a host locale change.
+  return normalizeHistoricalValue(value).replace(/\s+/g, " ").toLowerCase();
 }
 
 function addIssue(row: PreparedHistoricalRow, issue: HistoricalIssueCode) {
@@ -396,7 +401,7 @@ export function prepareHistoricalDataset(
   };
 }
 
-function stableJson(value: unknown) {
+function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
@@ -757,6 +762,12 @@ export function openDatabase() {
       }
       if (!database.objectStoreNames.contains(PHASE5_RESULTS_STORE)) {
         const store = database.createObjectStore(PHASE5_RESULTS_STORE, {
+          keyPath: ["runId", "rowId"],
+        });
+        store.createIndex("runId", "runId", { unique: false });
+      }
+      if (!database.objectStoreNames.contains(FINAL_DECISIONS_STORE)) {
+        const store = database.createObjectStore(FINAL_DECISIONS_STORE, {
           keyPath: ["runId", "rowId"],
         });
         store.createIndex("runId", "runId", { unique: false });

@@ -137,6 +137,8 @@ export type AssessmentValidationIssueCode =
   | "invalid_evidence_reference"
   | "evidence_not_exact"
   | "evidence_required"
+  | "evidence_insufficient"
+  | "possible_manipulation"
   | "unclear_result";
 
 export type AssessmentValidationIssue = {
@@ -409,6 +411,60 @@ export function evidenceIsExactAnswerSubstring(
   return typeof answer?.value === "string" && answer.value.includes(evidence.quote);
 }
 
+/**
+ * A verbatim quote can be real yet worthless as justification (a single word, a
+ * stray number, a fragment of punctuation). This is the floor, not a relevance
+ * test: `requireScoreSubstance` demands more for a numeric criterion score than
+ * for a pass/fail check, but a digit-bearing quote (e.g. "42%") always clears it
+ * so quantified metrics are never wrongly rejected.
+ */
+export function evidenceMeetsSubstance(quote: string, requireScoreSubstance: boolean) {
+  const trimmed = quote.trim();
+  if (trimmed.length < 3 || !/[\p{L}\p{N}]/u.test(trimmed)) return false;
+  if (!requireScoreSubstance) return true;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  return words.length >= 2 || /\d/.test(trimmed);
+}
+
+/**
+ * Applicant answers are untrusted submission text. This flags text that tries to
+ * steer the assessment — inject instructions, self-assign a score, or declare
+ * itself eligible / non-disqualified — so the case is routed to a person instead
+ * of letting a model-controlled score flow straight into the ranking. It never
+ * rejects or eliminates a case on its own; it only escalates to Human Review, so
+ * a false positive costs a human glance, never a wrongful rejection.
+ */
+const ASSESSMENT_STEERING_PATTERNS: readonly RegExp[] = [
+  // Instruction injection
+  /\bignore\s+(all\s+|any\s+)?(previous|prior|above|earlier)\s+(instruction|prompt|direction|rule|message)/i,
+  /\bdisregard\s+(the\s+|all\s+|any\s+|previous\s+|prior\s+|above\s+)?(instruction|prompt|guidance|rule|message)/i,
+  /\b(system|developer)\s+(prompt|message|instruction)/i,
+  /\bas\s+an?\s+(ai|language\s+model|assistant)\b/i,
+  /\bnew\s+instructions?\b/i,
+  /\byou\s+(must|should|will|are\s+required\s+to)\s+(score|rate|grade|mark|assign|award|give|select|shortlist|approve|pass|progress)/i,
+  // Self-assigned scores / grade injection
+  /\b\d{1,3}\s*\/\s*(5|10|100)\b/,
+  /\b(perfect|full|maximum|top|highest)\s+(score|marks?|rating|rank)\b/i,
+  /\baward\s+(us|me|this|the)\b/i,
+  // Evidence-marker spoofing
+  /\[\s*(verified|approved|confirmed|validated|official)\s+evidence\s*\]/i,
+  /\bverified\s+evidence\b/i,
+  /\bdo\s+not\s+(flag|review|reject|question|penali[sz]e)\b/i,
+  // Eligibility / elimination self-clearing
+  /\b(triggers?|meets?|violates?|breaches?)\s+(none|no)\s+(of\s+)?(the\s+)?(disqualif|eliminat|exclusion)/i,
+  /\b(no|zero)\s+(grounds?|basis|reason)\s+for\s+(disqualif|eliminat|exclusion|rejection)/i,
+  /\b(fully|completely|entirely)\s+(eligible|qualified)\b/i,
+  /\b(should|must)\s+(be\s+)?(shortlisted|selected|progressed)\b/i,
+];
+
+export function detectAssessmentSteering(text: string): boolean {
+  return typeof text === "string" && ASSESSMENT_STEERING_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export function answersContainSteering(answers: readonly Phase4Answer[]): boolean {
+  return answers.some((answer) => detectAssessmentSteering(answer?.value ?? ""));
+}
+
 function validateGuide(guide: Phase4ApprovedGuide): AssessmentValidationIssue[] {
   const issues: AssessmentValidationIssue[] = [];
   if (!isRecord(guide) || guide.status !== "approved") {
@@ -523,6 +579,7 @@ function evidenceIssue(
   answers: readonly Phase4Answer[],
   path: string,
   required: boolean,
+  requireScoreSubstance = false,
 ): AssessmentValidationIssue | null {
   if (!evidence) {
     return required
@@ -545,6 +602,13 @@ function evidenceIssue(
       code: "evidence_not_exact",
       path,
       message: "Evidence quote is not an exact substring of the referenced current answer value.",
+    };
+  }
+  if (!evidenceMeetsSubstance(evidence.quote, requireScoreSubstance)) {
+    return {
+      code: "evidence_insufficient",
+      path,
+      message: "Evidence quote is too thin to support this decision; a person must review it.",
     };
   }
   return null;
@@ -682,6 +746,7 @@ export function validateAiCaseAssessment(
         currentCase.answers,
         `criterionScores[${index}].evidence`,
         score.score !== null,
+        score.score !== null,
       );
       if (evidence) issues.push(evidence);
       if (score.score === null) {
@@ -692,12 +757,21 @@ export function validateAiCaseAssessment(
         });
       }
     });
+    if (answersContainSteering(currentCase.answers)) {
+      issues.push({
+        code: "possible_manipulation",
+        path: "currentCase.answers",
+        message:
+          "Applicant text appears to instruct or steer the assessment (injected instructions, a self-assigned score, or a self-cleared disqualifier). A person must review this case.",
+      });
+    }
   }
 
   const evidenceInvalidCodes = new Set<AssessmentValidationIssueCode>([
     "invalid_evidence_reference",
     "evidence_not_exact",
     "evidence_required",
+    "evidence_insufficient",
   ]);
   const evidenceValid = !issues.some((issue) => evidenceInvalidCodes.has(issue.code));
   const noAssessmentUncertainty = assessment.uncertainties.length === 0;
@@ -1000,7 +1074,8 @@ export function calculateLockedPracticeMetrics(args: {
   }
 
   const assessmentIds = new Set<string>();
-  const metricCases: PracticeMetricCase[] = assessments.map((assessment) => {
+  const metricCases: PracticeMetricCase[] = assessments.map(
+    (assessment: LockedPracticeMetricAssessment) => {
     if (
       !assessment ||
       typeof assessment.rowId !== "string" ||
@@ -1037,7 +1112,8 @@ export function calculateLockedPracticeMetrics(args: {
           assessment.criteria.find((criterion) => criterion.criterionId === ruleId)?.score ?? 0,
       ),
     };
-  });
+    },
+  );
 
   if (assessmentIds.size !== outcomeById.size) {
     throw new Error("The locked assessment and outcome sets do not match.");

@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import AccountControls from "./account-controls";
+import BackupControls from "./backup-controls";
 import { HistoricalImportBuilder } from "./historical-import";
 import { Phase4Workspace } from "./phase4";
 import { CurrentImportBuilder } from "./current-import";
@@ -36,6 +38,7 @@ import type {
   Phase5SafeguardApproval,
 } from "./phase5-storage";
 import { createPhase4InputFingerprint } from "./phase4-logic";
+import ProductionDashboard from "./production-dashboard";
 
 const LEGACY_STORAGE_KEY = "minder-net-zero-phase-1";
 const V2_STORAGE_KEY = "minder-net-zero-app-v2";
@@ -105,6 +108,8 @@ type StoredState = {
   historicalImport: HistoricalImportSummary;
   phase4: Phase4Summary;
   currentImport: CurrentImportSummary;
+  // Monotonic counter used to detect a concurrent write from another tab.
+  stateSerial?: number;
 };
 
 type ActiveView =
@@ -361,24 +366,24 @@ function sanitizeGuide(value: unknown, shortlistTarget: string): DecisionGuide {
 
 function sanitizeSnapshots(value: unknown): ApprovedSnapshot[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (!item || typeof item !== "object") return null;
-      const source = item as Partial<ApprovedSnapshot>;
-      const approvedAt = cleanText(source.approvedAt);
-      const approvedBy = cleanText(source.approvedBy);
-      const version = Number(source.version);
-      if (!approvedAt || !approvedBy || !Number.isInteger(version) || version < 1) return null;
-      const guide = sanitizeGuide(source.guide, "");
-      return {
-        id: cleanText(source.id) || `version-${version}`,
-        version,
-        approvedAt,
-        approvedBy,
-        guide: { ...guide, status: "approved", version, approvedAt, approvedBy },
-      } satisfies ApprovedSnapshot;
-    })
-    .filter((snapshot): snapshot is ApprovedSnapshot => Boolean(snapshot));
+  const snapshots: ApprovedSnapshot[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const source = item as Partial<ApprovedSnapshot>;
+    const approvedAt = cleanText(source.approvedAt);
+    const approvedBy = cleanText(source.approvedBy);
+    const version = Number(source.version);
+    if (!approvedAt || !approvedBy || !Number.isInteger(version) || version < 1) continue;
+    const guide = sanitizeGuide(source.guide, "");
+    snapshots.push({
+      id: cleanText(source.id) || `version-${version}`,
+      version,
+      approvedAt,
+      approvedBy,
+      guide: { ...guide, status: "approved", version, approvedAt, approvedBy },
+    });
+  }
+  return snapshots;
 }
 
 function loadStoredState(): { state: StoredState; recovered: boolean } {
@@ -653,6 +658,10 @@ function formatApprovalDate(value: string | null) {
 }
 
 export default function Home() {
+  return process.env.NEXT_PUBLIC_AUTH_MODE === "clerk" ? <ProductionDashboard /> : <LegacyHome />;
+}
+
+function LegacyHome() {
   const [details, setDetails] = useState<CompetitionDetails>(DEFAULT_DETAILS);
   const [savedDetails, setSavedDetails] = useState<CompetitionDetails>(DEFAULT_DETAILS);
   const [guide, setGuide] = useState<DecisionGuide>(() => createEmptyGuide());
@@ -678,9 +687,24 @@ export default function Home() {
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<"saved" | "error" | "recovered">("saved");
   const [activeView, setActiveView] = useState<ActiveView>("overview");
+  const [tabConflict, setTabConflict] = useState(false);
+  // Highest state serial this tab has seen; guards against a stale tab silently
+  // overwriting a newer write from another tab.
+  const stateSerialRef = useRef(0);
 
   useEffect(() => {
     const loaded = loadStoredState();
+    const rawStored = window.localStorage.getItem(STORAGE_KEY);
+    if (rawStored) {
+      try {
+        const parsedSerial = (JSON.parse(rawStored) as { stateSerial?: unknown }).stateSerial;
+        if (typeof parsedSerial === "number" && Number.isFinite(parsedSerial)) {
+          stateSerialRef.current = parsedSerial;
+        }
+      } catch {
+        // A corrupt blob leaves the serial at 0; the save path re-establishes it.
+      }
+    }
     // Hydration must finish before a device-local draft can safely replace the server default.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setDetails(loaded.state.details);
@@ -764,20 +788,42 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!isReady) return;
-    const state: StoredState = {
-      schemaVersion: 5,
-      details: savedDetails,
-      guide,
-      approvedVersions,
-      historicalImport,
-      phase4,
-      currentImport,
-    };
+    if (!isReady || tabConflict) return;
     try {
+      // Refuse to write over a newer serial from another tab; surface a conflict
+      // instead of silently erasing that tab's approved guide or version history.
+      const existingRaw = window.localStorage.getItem(STORAGE_KEY);
+      if (existingRaw) {
+        try {
+          const existingSerial = (JSON.parse(existingRaw) as { stateSerial?: unknown }).stateSerial;
+          if (
+            typeof existingSerial === "number" &&
+            Number.isFinite(existingSerial) &&
+            existingSerial > stateSerialRef.current
+          ) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect
+            setTabConflict(true);
+            setSaveState("error");
+            return;
+          }
+        } catch {
+          // Unparseable existing blob: overwrite it with this tab's good state.
+        }
+      }
+      const nextSerial = stateSerialRef.current + 1;
+      const state: StoredState = {
+        schemaVersion: 5,
+        details: savedDetails,
+        guide,
+        approvedVersions,
+        historicalImport,
+        phase4,
+        currentImport,
+        stateSerial: nextSerial,
+      };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      stateSerialRef.current = nextSerial;
       // This status reflects the result of synchronising with browser storage.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSavedAt(
         new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit" }).format(new Date()),
       );
@@ -785,7 +831,11 @@ export default function Home() {
     } catch {
       setSaveState("error");
     }
-  }, [approvedVersions, currentImport, guide, historicalImport, isReady, phase4, savedDetails]);
+  }, [approvedVersions, currentImport, guide, historicalImport, isReady, phase4, savedDetails, tabConflict]);
+  // Note: the conflict is detected lazily at save time (above), not via a
+  // proactive `storage` listener. A second tab merely being open must not brick
+  // the tab the organiser is actually working in; only an attempt to overwrite
+  // a newer serial with this tab's stale state raises the conflict.
 
   const detailsComplete = useMemo(
     () =>
@@ -1063,6 +1113,10 @@ export default function Home() {
           </div>
         </div>
 
+        <BackupControls />
+
+        <AccountControls />
+
         <div className="sidebar-footer"><span className="status-dot" />Private test-data pilot</div>
       </aside>
 
@@ -1080,6 +1134,16 @@ export default function Home() {
             <span className="save-check">{saveState === "error" ? "!" : "✓"}</span>{statusCopy}
           </div>
         </header>
+
+        {tabConflict ? (
+          <section className="tab-conflict-banner" role="alert">
+            <div>
+              <strong>This workspace was updated in another tab.</strong>
+              <p>To avoid overwriting that newer work, saving here is paused. Reload to continue with the latest version.</p>
+            </div>
+            <button type="button" onClick={() => window.location.reload()}>Reload</button>
+          </section>
+        ) : null}
 
         <section className="safety-banner" aria-label="Minder safety policy">
           <div className="banner-icon" aria-hidden="true">◎</div>
@@ -1178,6 +1242,8 @@ export default function Home() {
             guide={guide as Phase5FullGuide}
             phase4={phase4Session}
             safeguards={phase5Approval}
+            organiserName={savedDetails.organiserName.trim() || "Organiser"}
+            competitionName={savedDetails.competitionName.trim() || "Minder Net Zero"}
             onRunChange={setPhase5Run}
             onBack={openApplications}
             onRecalibrate={() => setActiveView("overview")}

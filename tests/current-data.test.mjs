@@ -333,7 +333,7 @@ test("supersedes but never deletes applications once an assessment run reference
   await saveCurrentDataset(original);
 
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -362,7 +362,7 @@ test("supersedes but never deletes applications once an assessment run reference
   assert.equal((await loadActiveCurrentSummary()).datasetId, replacement.metadata.id);
 
   const cleanup = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -384,7 +384,7 @@ test("fails closed when stored answer text is changed after sealing", async () =
   });
   await saveCurrentDataset(dataset);
   const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 5);
+    const request = indexedDB.open("minder-net-zero-private-v1", 6);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
