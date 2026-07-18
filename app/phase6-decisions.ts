@@ -2,13 +2,25 @@
  * Phase 6: final human decisions and export.
  *
  * Minder's cohort recommendations are provisional. This module records what an
- * authorised person actually decided per application, keyed to the exact run
- * that produced the recommendation, and builds the CSV that leaves the app.
- * Decisions stay editable until the organiser is done — human authority, not
- * an immutable AI artifact — but every decision keeps who and when.
+ * authorised person actually decided per application and builds the CSV that
+ * leaves the app. Decisions stay editable until the organiser is done — human
+ * authority, not an immutable AI artifact — but every decision keeps who and
+ * when.
+ *
+ * Storage is the Postgres pilot backend (POST /api/pilot), not the browser:
+ *   - Decisions are workspace + application scoped, not run scoped. A human
+ *     decision is about the application; the AI run is reference only, so a
+ *     decision persists across re-runs. `runId` is kept in the signatures purely
+ *     as a caller-side label and is not a storage key.
+ *   - `decidedBy` (a display name) resolves server-side to a roster reviewer, so
+ *     the stored attribution is a real reviewer, the same roster the Phase F
+ *     dropdown will use. Load returns that reviewer's display name back.
+ *   - Clearing a decision records it as `undecided` (kept in the append-only
+ *     journal) rather than deleting; load hides `undecided`, so a cleared
+ *     decision reads as absent.
  */
 
-import { FINAL_DECISIONS_STORE, openDatabase, transactionComplete } from "./historical-data.ts";
+import { pilot } from "./pilot-client.ts";
 import type { Phase5CohortRecommendation, Phase5StoredAssessment } from "./phase5-storage.ts";
 import type { StoredCurrentIdentity } from "./current-data.ts";
 
@@ -37,52 +49,32 @@ export async function saveFinalDecision(decision: FinalDecision): Promise<void> 
   if (!decision.decidedBy.trim()) {
     throw new Error("A final decision must name the person who made it.");
   }
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction([FINAL_DECISIONS_STORE], "readwrite");
-    transaction.objectStore(FINAL_DECISIONS_STORE).put({ ...decision });
-    await transactionComplete(transaction);
-  } finally {
-    database.close();
-  }
+  await pilot("decisions.record", {
+    applicationRowId: decision.rowId,
+    decision: decision.decision,
+    decidedByName: decision.decidedBy,
+  });
 }
 
+// runId is workspace-scoped now (see the module header) and kept only for the
+// legacy call signature; the application row identifies the decision.
 export async function clearFinalDecision(runId: string, rowId: string): Promise<void> {
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction([FINAL_DECISIONS_STORE], "readwrite");
-    transaction.objectStore(FINAL_DECISIONS_STORE).delete([runId, rowId]);
-    await transactionComplete(transaction);
-  } finally {
-    database.close();
-  }
+  await pilot("decisions.clear", { applicationRowId: rowId });
 }
 
 export async function loadFinalDecisions(runId: string): Promise<FinalDecision[]> {
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction([FINAL_DECISIONS_STORE], "readonly");
-    const request = transaction
-      .objectStore(FINAL_DECISIONS_STORE)
-      .index("runId")
-      .getAll(IDBKeyRange.only(runId));
-    return await new Promise<FinalDecision[]>((resolve, reject) => {
-      request.onsuccess = () => {
-        const rows = Array.isArray(request.result) ? request.result : [];
-        resolve(
-          rows.filter(
-            (row): row is FinalDecision =>
-              Boolean(row) &&
-              typeof (row as FinalDecision).rowId === "string" &&
-              isDecisionValue((row as FinalDecision).decision),
-          ),
-        );
-      };
-      request.onerror = () => reject(request.error ?? new Error("Saved decisions could not be read."));
-    });
-  } finally {
-    database.close();
-  }
+  const rows = await pilot<
+    { rowId: string; decision: FinalDecisionValue; decidedBy: string; decidedAt: string }[]
+  >("decisions.load");
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => Boolean(row) && typeof row.rowId === "string" && isDecisionValue(row.decision))
+    .map((row) => ({
+      runId,
+      rowId: row.rowId,
+      decision: row.decision,
+      decidedBy: row.decidedBy,
+      decidedAt: row.decidedAt,
+    }));
 }
 
 /**

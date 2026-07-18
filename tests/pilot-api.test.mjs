@@ -123,4 +123,68 @@ if (!url) {
     const reference = (await call("ai.reference", {})).body.data;
     assert.deepEqual(reference, []);
   });
+
+  test("records, loads, and clears final decisions with roster attribution", async () => {
+    const before = (await call("reviewers.list", {})).body.data.length;
+    const [{ n: activeBefore }] = await sql`SELECT count(*)::int AS n FROM netzero.reviewers WHERE active`;
+
+    // A typed decider name seeds the roster and attributes the decision to a real
+    // reviewer (the same roster the Phase F dropdown will read).
+    const rec = await call("decisions.record", { applicationRowId: "dec-1", decision: "shortlist", decidedByName: "Reviewer One" });
+    assert.equal(rec.status, 200);
+    const seeded = (await call("reviewers.list", {})).body.data;
+    assert.equal(seeded.length, before + 1, "a new decider name seeds exactly one roster reviewer");
+    const reviewerOne = seeded.find((r) => r.displayName === "Reviewer One");
+    assert.ok(reviewerOne, "the decider is now a roster reviewer");
+
+    // A decision-only decider is seeded INACTIVE, so it cannot enlarge the
+    // final_ranking coverage roster (which is built from active reviewers only).
+    assert.equal(reviewerOne.active, false, "a decision-only decider is not an active marker");
+    const [{ n: activeAfter }] = await sql`SELECT count(*)::int AS n FROM netzero.reviewers WHERE active`;
+    assert.equal(activeAfter, activeBefore, "recording a decision does not grow the active marking roster");
+
+    // Re-recording with the same name reuses the reviewer, not a duplicate.
+    await call("decisions.record", { applicationRowId: "dec-1", decision: "shortlist", decidedByName: "Reviewer One" });
+    assert.equal((await call("reviewers.list", {})).body.data.length, before + 1);
+
+    // A second decision; the client value maps to the DB's -ed form.
+    await call("decisions.record", { applicationRowId: "dec-2", decision: "reject", decidedByName: "Reviewer One" });
+    const [stored] = await sql`
+      SELECT decision, decided_by FROM netzero.final_decisions WHERE application_row_id = 'dec-2'`;
+    assert.equal(stored.decision, "rejected");
+    assert.equal(stored.decided_by, reviewerOne.id, "attribution is a real reviewer FK");
+
+    // The third value (waitlist) maps in BOTH directions too.
+    await call("decisions.record", { applicationRowId: "dec-4", decision: "waitlist", decidedByName: "Reviewer One" });
+    const [wl] = await sql`
+      SELECT decision FROM netzero.final_decisions WHERE application_row_id = 'dec-4'`;
+    assert.equal(wl.decision, "waitlisted");
+
+    // load returns client values + the reviewer's display name.
+    let loaded = (await call("decisions.load", {})).body.data;
+    const one = loaded.find((d) => d.rowId === "dec-1");
+    assert.equal(one.decision, "shortlist");
+    assert.equal(one.decidedBy, "Reviewer One");
+    assert.match(one.decidedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(loaded.find((d) => d.rowId === "dec-2").decision, "reject");
+    assert.equal(loaded.find((d) => d.rowId === "dec-4").decision, "waitlist");
+
+    // clear -> recorded as `undecided` (journal keeps it) and hidden from load.
+    await call("decisions.clear", { applicationRowId: "dec-1" });
+    loaded = (await call("decisions.load", {})).body.data;
+    assert.equal(loaded.find((d) => d.rowId === "dec-1"), undefined, "a cleared decision reads as absent");
+    assert.ok(loaded.find((d) => d.rowId === "dec-2"), "other decisions remain");
+    const [{ decision: cleared }] = await sql`
+      SELECT decision FROM netzero.final_decisions WHERE application_row_id = 'dec-1'`;
+    assert.equal(cleared, "undecided");
+    const events = await sql`
+      SELECT decision FROM netzero.final_decision_events WHERE application_row_id = 'dec-1' ORDER BY at`;
+    assert.ok(events.length >= 2, "the append-only journal captured every write, including the clear");
+    assert.equal(events.at(-1).decision, "undecided");
+
+    // an unknown decision value is rejected before it reaches the DB.
+    const bad = await call("decisions.record", { applicationRowId: "dec-3", decision: "approve", decidedByName: "Reviewer One" });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error.message, /Only shortlist, reject or waitlist/);
+  });
 }

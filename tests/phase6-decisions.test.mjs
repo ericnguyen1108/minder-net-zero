@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { IDBKeyRange, indexedDB } from "fake-indexeddb";
 import {
   RESULTS_CSV_HEADER,
   buildResultsCsv,
@@ -12,8 +11,21 @@ import {
   sortResultsForExport,
 } from "../app/phase6-decisions.ts";
 
-globalThis.indexedDB = indexedDB;
-globalThis.IDBKeyRange = IDBKeyRange;
+// The storage trio now talks to POST /api/pilot via the pilot() transport, which
+// uses global fetch. Mock it so this stays a fast unit test (no server/DB); the
+// real round-trip is covered against Postgres in tests/pilot-api.test.mjs.
+const originalFetch = globalThis.fetch;
+function stubFetch(handler) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const parsed = JSON.parse(init.body);
+    calls.push({ url, method: init.method, ...parsed });
+    const { status = 200, body = { ok: true, data: [] } } = handler(parsed) ?? {};
+    return { ok: status >= 200 && status < 300, status, json: async () => body };
+  };
+  return calls;
+}
+test.afterEach(() => { globalThis.fetch = originalFetch; });
 
 function recommendation(overrides = {}) {
   return {
@@ -39,7 +51,8 @@ function identity(overrides = {}) {
   };
 }
 
-test("final decisions round-trip per run and can be cleared", async () => {
+test("saveFinalDecision posts the record action with the client decision value and decider name", async () => {
+  const calls = stubFetch(() => ({ body: { ok: true, data: { ok: true } } }));
   await saveFinalDecision({
     runId: "run-1",
     rowId: "row-1",
@@ -47,61 +60,59 @@ test("final decisions round-trip per run and can be cleared", async () => {
     decidedBy: "Vy",
     decidedAt: "2026-07-16T10:00:00.000Z",
   });
-  await saveFinalDecision({
-    runId: "run-1",
-    rowId: "row-2",
-    decision: "reject",
-    decidedBy: "Vy",
-    decidedAt: "2026-07-16T10:01:00.000Z",
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/pilot");
+  assert.equal(calls[0].action, "decisions.record");
+  assert.deepEqual(calls[0].payload, {
+    applicationRowId: "row-1",
+    decision: "shortlist",
+    decidedByName: "Vy",
   });
-  await saveFinalDecision({
-    runId: "run-2",
-    rowId: "row-1",
-    decision: "waitlist",
-    decidedBy: "Nam",
-    decidedAt: "2026-07-16T10:02:00.000Z",
-  });
+});
 
-  const runOne = await loadFinalDecisions("run-1");
-  assert.equal(runOne.length, 2);
-  assert.deepEqual(runOne.map((decision) => decision.decision).sort(), ["reject", "shortlist"]);
-
-  // Overwriting a decision keeps one record per case.
-  await saveFinalDecision({
-    runId: "run-1",
-    rowId: "row-1",
-    decision: "waitlist",
-    decidedBy: "Vy",
-    decidedAt: "2026-07-16T11:00:00.000Z",
-  });
-  const updated = await loadFinalDecisions("run-1");
-  assert.equal(updated.length, 2);
-  assert.equal(updated.find((decision) => decision.rowId === "row-1")?.decision, "waitlist");
-
-  await clearFinalDecision("run-1", "row-2");
-  assert.equal((await loadFinalDecisions("run-1")).length, 1);
-  assert.equal((await loadFinalDecisions("run-2")).length, 1);
-
+test("saveFinalDecision validates before touching the network", async () => {
+  const calls = stubFetch(() => ({ body: { ok: true, data: { ok: true } } }));
   await assert.rejects(
-    saveFinalDecision({
-      runId: "run-1",
-      rowId: "row-9",
-      decision: "approve",
-      decidedBy: "Vy",
-      decidedAt: "2026-07-16T10:00:00.000Z",
-    }),
+    saveFinalDecision({ runId: "run-1", rowId: "row-9", decision: "approve", decidedBy: "Vy", decidedAt: "x" }),
     /Only shortlist, reject or waitlist/,
   );
   await assert.rejects(
-    saveFinalDecision({
-      runId: "run-1",
-      rowId: "row-9",
-      decision: "shortlist",
-      decidedBy: "  ",
-      decidedAt: "2026-07-16T10:00:00.000Z",
-    }),
+    saveFinalDecision({ runId: "run-1", rowId: "row-9", decision: "shortlist", decidedBy: "  ", decidedAt: "x" }),
     /name the person/,
   );
+  await assert.rejects(
+    saveFinalDecision({ runId: " ", rowId: "row-9", decision: "shortlist", decidedBy: "Vy", decidedAt: "x" }),
+    /needs its run and application/,
+  );
+  assert.equal(calls.length, 0, "no request is sent for an invalid decision");
+});
+
+test("clearFinalDecision posts the clear action keyed by application row", async () => {
+  const calls = stubFetch(() => ({ body: { ok: true, data: { ok: true } } }));
+  await clearFinalDecision("run-1", "row-2");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].action, "decisions.clear");
+  assert.deepEqual(calls[0].payload, { applicationRowId: "row-2" });
+});
+
+test("loadFinalDecisions stamps the run id, keeps only valid values, and tolerates a bad body", async () => {
+  stubFetch(() => ({
+    body: {
+      ok: true,
+      data: [
+        { rowId: "row-1", decision: "shortlist", decidedBy: "Vy", decidedAt: "2026-07-16T10:00:00.000Z" },
+        { rowId: "row-2", decision: "reject", decidedBy: "Nam", decidedAt: "2026-07-16T10:01:00.000Z" },
+        { rowId: "row-3", decision: "garbage", decidedBy: "Nam", decidedAt: "2026-07-16T10:02:00.000Z" },
+      ],
+    },
+  }));
+  const decisions = await loadFinalDecisions("run-77");
+  assert.equal(decisions.length, 2);
+  assert.ok(decisions.every((d) => d.runId === "run-77"));
+  assert.deepEqual(decisions.map((d) => d.decision).sort(), ["reject", "shortlist"]);
+
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ ok: true, data: null }) });
+  assert.deepEqual(await loadFinalDecisions("run-1"), []);
 });
 
 test("CSV export escapes quotes, guards formula injection, and keeps table order", () => {

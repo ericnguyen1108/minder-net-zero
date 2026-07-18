@@ -37,6 +37,20 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 const CONFLICT_ERRORS = new Set(["revision_conflict", "already_revealed", "stale_lease", "unknown_batch"]);
 
+// The client speaks shortlist/reject/waitlist; the DB CHECK speaks the -ed forms
+// plus `undecided` (a cleared decision, recorded rather than deleted so the
+// append-only final_decision_events journal captures it).
+const DECISION_TO_DB = { shortlist: "shortlisted", reject: "rejected", waitlist: "waitlisted" } as const;
+const DECISION_FROM_DB = { shortlisted: "shortlist", rejected: "reject", waitlisted: "waitlist" } as const;
+
+/** Resolve an optional typed name to a roster reviewer id (seeding the roster). */
+async function resolveDecider(wsId: string, decidedByName: unknown): Promise<string | null> {
+  const name = typeof decidedByName === "string" ? decidedByName.trim() : "";
+  if (!name) return null;
+  const reviewer = await marking.ensureReviewerByName(wsId, name);
+  return reviewer.id;
+}
+
 export async function POST(request: Request): Promise<Response> {
   const authorized = await requestIsAuthorized({
     hostHeader: request.headers.get("host"),
@@ -206,15 +220,38 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       return marking.loadRanking(wsId);
     case "ai.reference":
       return marking.loadAiReference(wsId);
-    case "decisions.record":
+    case "decisions.record": {
+      const dbDecision = DECISION_TO_DB[String(p.decision) as keyof typeof DECISION_TO_DB];
+      if (!dbDecision) throw new Error("Only shortlist, reject or waitlist can be recorded.");
       await marking.recordFinalDecision({
         workspaceId: wsId,
         applicationRowId: String(p.applicationRowId),
-        decision: p.decision as "shortlisted" | "rejected" | "waitlisted" | "undecided",
-        decidedBy: (p.decidedBy as string | null) ?? null,
+        decision: dbDecision,
+        decidedBy: await resolveDecider(wsId, p.decidedByName),
         notes: (p.notes as string | null) ?? null,
       });
       return { ok: true };
+    }
+    case "decisions.clear":
+      // A cleared decision is recorded as `undecided`, not deleted, so the
+      // append-only journal keeps the un-decision; decisions.load hides it.
+      await marking.recordFinalDecision({
+        workspaceId: wsId,
+        applicationRowId: String(p.applicationRowId),
+        decision: "undecided",
+        decidedBy: await resolveDecider(wsId, p.decidedByName),
+        notes: null,
+      });
+      return { ok: true };
+    case "decisions.load":
+      return (await marking.loadFinalDecisions(wsId))
+        .filter((d) => d.decision !== "undecided")
+        .map((d) => ({
+          rowId: d.applicationRowId,
+          decision: DECISION_FROM_DB[d.decision as keyof typeof DECISION_FROM_DB],
+          decidedBy: d.decidedByName ?? "",
+          decidedAt: new Date(d.decidedAt).toISOString(),
+        }));
 
     default:
       return undefined;

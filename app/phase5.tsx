@@ -739,11 +739,20 @@ export function AssessmentWorkspace({
     () => new Map(decisions.map((decision) => [decision.rowId, decision])),
     [decisions],
   );
+  // Decisions are workspace-scoped, so count only those in the current run's
+  // cohort — a decision left over from a differently-frozen dataset (or another
+  // device) must not inflate the summary. The table and CSV already join by
+  // rowId via decisionByRowId, so they are unaffected.
+  const cohortDecisions = useMemo(() => {
+    if (!run) return [] as FinalDecision[];
+    const cohortRowIds = new Set(run.cohortRecommendations.map((item) => item.rowId));
+    return decisions.filter((decision) => cohortRowIds.has(decision.rowId));
+  }, [run, decisions]);
   const decisionCounts = useMemo(() => {
     const counts = { shortlist: 0, reject: 0, waitlist: 0 };
-    decisions.forEach((decision) => { counts[decision.decision] += 1; });
+    cohortDecisions.forEach((decision) => { counts[decision.decision] += 1; });
     return counts;
-  }, [decisions]);
+  }, [cohortDecisions]);
   const orderedResults = useMemo(() => {
     if (!run) return [] as ResultsExportRow[];
     return sortResultsForExport(
@@ -875,7 +884,7 @@ export function AssessmentWorkspace({
             <div><span className="section-kicker">Final human review</span><h3>Record the final decision for every application</h3><p>Minder&apos;s recommendations are provisional. An authorised person records each final decision; nothing is decided until you decide it. Human Review cases have no rank on purpose — read them first.</p></div>
             <div className="phase5-recommendation-grid"><div><span>Provisional shortlist zone</span><strong>{recommendationCounts.progressed}</strong></div><div><span>Outside provisional zone</span><strong>{recommendationCounts.not_progressed}</strong></div><div><span>Potentially ineligible</span><strong>{recommendationCounts.ineligible}</strong></div><div className="attention"><span>Human Review first</span><strong>{recommendationCounts.human_review}</strong></div></div>
             <div className="phase5-decision-summary" role="status">
-              <strong>{decisions.length.toLocaleString()} of {run.cohortRecommendations.length.toLocaleString()} decided</strong>
+              <strong>{cohortDecisions.length.toLocaleString()} of {run.cohortRecommendations.length.toLocaleString()} decided</strong>
               <span>{decisionCounts.shortlist} shortlisted · {decisionCounts.waitlist} waitlisted · {decisionCounts.reject} rejected</span>
               <button className="secondary-button" type="button" onClick={exportResultsCsv}>Export results (CSV)</button>
             </div>

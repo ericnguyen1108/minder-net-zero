@@ -89,6 +89,38 @@ export async function addReviewer(
   return row;
 }
 
+/**
+ * Find-or-create a roster reviewer by display name, returning its row. Used to
+ * attribute a final decision to a roster reviewer before the Phase F dropdown
+ * exists: the organiser's typed name resolves to a reviewer in the SAME table
+ * the dropdown will later read, so `final_decisions.decided_by` is always a real
+ * reviewer FK. Idempotent (unique on workspace_id + display_name).
+ *
+ * A newly-seeded decider is created INACTIVE. `active` means "an expected marker"
+ * — the final_ranking view builds its coverage roster from active reviewers only
+ * — so a decision-only person (an organiser who decides but never marks) must not
+ * enlarge that roster, or every application would read coverage_complete = false.
+ * An existing reviewer's active flag is never changed (the ON CONFLICT is a
+ * no-op), so a real marker who also decides stays active; an inactive decider can
+ * be promoted later via setReviewerActive. listReviewers still returns inactive
+ * rows, so the decider remains selectable in the Phase F dropdown.
+ */
+export async function ensureReviewerByName(
+  workspaceId: string,
+  displayName: string,
+  sql: Sql = pilotSql(),
+): Promise<Reviewer> {
+  const name = displayName.trim();
+  if (!name) throw new Error("A reviewer name is required.");
+  const [row] = await sql<Reviewer[]>`
+    INSERT INTO netzero.reviewers (workspace_id, display_name, active)
+    VALUES (${workspaceId}, ${name}, false)
+    ON CONFLICT (workspace_id, display_name)
+      DO UPDATE SET display_name = EXCLUDED.display_name
+    RETURNING id, display_name AS "displayName", active`;
+  return row;
+}
+
 export async function setReviewerActive(
   reviewerId: string,
   active: boolean,
@@ -317,11 +349,21 @@ export async function loadAiReference(workspaceId: string, sql: Sql = pilotSql()
 
 // --------------------------------------------------------- final decisions ---
 
+export type DecisionValue = "shortlisted" | "rejected" | "waitlisted" | "undecided";
+
+export type StoredFinalDecision = {
+  applicationRowId: string;
+  decision: DecisionValue;
+  decidedByName: string | null;
+  decidedAt: Date;
+  notes: string | null;
+};
+
 export async function recordFinalDecision(
   input: {
     workspaceId: string;
     applicationRowId: string;
-    decision: "shortlisted" | "rejected" | "waitlisted" | "undecided";
+    decision: DecisionValue;
     decidedBy: string | null;
     notes?: string | null;
   },
@@ -335,4 +377,27 @@ export async function recordFinalDecision(
     ON CONFLICT (workspace_id, application_row_id)
       DO UPDATE SET decision = EXCLUDED.decision, decided_by = EXCLUDED.decided_by,
                     notes = EXCLUDED.notes, decided_at = now()`;
+}
+
+/**
+ * All final decisions for the workspace, one row per application (the unique
+ * constraint keeps latest-write-wins), with the deciding reviewer's display name
+ * resolved. Decisions are workspace + application scoped, NOT run scoped: a human
+ * decision is about the application, and the AI run is reference only, so a
+ * decision persists across re-runs of the reference assessment.
+ */
+export async function loadFinalDecisions(
+  workspaceId: string,
+  sql: Sql = pilotSql(),
+): Promise<StoredFinalDecision[]> {
+  return sql<StoredFinalDecision[]>`
+    SELECT d.application_row_id AS "applicationRowId",
+           d.decision,
+           r.display_name AS "decidedByName",
+           d.decided_at AS "decidedAt",
+           d.notes
+      FROM netzero.final_decisions d
+      LEFT JOIN netzero.reviewers r ON r.id = d.decided_by
+     WHERE d.workspace_id = ${workspaceId}
+     ORDER BY d.application_row_id`;
 }
