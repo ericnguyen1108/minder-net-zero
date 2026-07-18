@@ -130,13 +130,23 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
         outcomeMapping: p.outcomeMapping as never,
         prepared,
       });
-      const saved = await importRepo.saveHistoricalDataset(wsId, sealed);
-      return { ...saved, summary: sealed.metadata.summary };
+      // saveHistoricalDataset returns { datasetId, fingerprint, summary } with
+      // the summary's datasetId reconciled to the DB id.
+      return importRepo.saveHistoricalDataset(wsId, sealed, (p.replaceDatasetId as string | null) ?? null);
     }
     case "historical.teaching":
       return importRepo.loadTeachingRows(String(p.datasetId));
     case "historical.blind":
       return importRepo.loadBlindCases(String(p.datasetId));
+    case "historical.active":
+      return importRepo.loadActiveHistoricalSummary(wsId);
+    case "historical.binding":
+      return importRepo.loadHistoricalDatasetBinding(wsId, String(p.datasetId));
+    case "historical.exists":
+      return { exists: await importRepo.historicalDatasetExists(wsId, String(p.datasetId)) };
+    case "historical.delete":
+      await importRepo.deleteHistoricalDataset(wsId, String(p.datasetId));
+      return { ok: true };
 
     // ---- current applications ------------------------------------------
     case "current.freeze": {

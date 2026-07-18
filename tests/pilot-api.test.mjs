@@ -187,4 +187,68 @@ if (!url) {
     assert.equal(bad.status, 400);
     assert.match(bad.body.error.message, /Only shortlist, reject or waitlist/);
   });
+
+  test("historical: active summary, binding, exists, replace, and delete", async () => {
+    const makeHistTable = (tag) => {
+      const rows = Array.from({ length: 40 }, (_, i) => ({
+        id: `HIST${tag}-${String(i + 1).padStart(4, "0")}`,
+        team: `Hist ${tag} Team ${i + 1}`,
+        problem: `Hist ${tag} problem ${i + 1} explains the material climate challenge in sufficient detail.`,
+        solution: `Hist ${tag} solution ${i + 1} explains the intervention, evidence and delivery plan in detail.`,
+        outcome: i < 20 ? "Shortlisted" : "Not selected", year: "2026",
+      }));
+      return { sheetName: "Applications", columns, rows, rowNumbers: rows.map((_, i) => i + 2) };
+    };
+    const importHist = (tag, extra = {}) => call("historical.import", {
+      table: makeHistTable(tag), mapping, outcomeMapping,
+      fileName: `hist${tag}.csv`, fileSize: 4096, guideVersion: 1, ...extra,
+    });
+
+    // Import A; it becomes the single active dataset. The stored summary carries
+    // the DB id, not the seal's throwaway id.
+    const a = (await importHist("A")).body.data;
+    assert.match(a.fingerprint, /^[0-9a-f]{64}$/);
+    assert.equal(a.summary.datasetId, a.datasetId, "the stored summary carries the DB dataset id");
+    assert.equal(a.summary.status, "ready");
+
+    const active = (await call("historical.active", {})).body.data;
+    assert.equal(active.datasetId, a.datasetId);
+    assert.equal(active.teachingRows + active.sealedRows, active.validRows);
+
+    // Binding returns the server-authored fingerprint / integrity / guide / counts.
+    const binding = (await call("historical.binding", { datasetId: a.datasetId })).body.data;
+    assert.equal(binding.datasetFingerprint, a.fingerprint);
+    assert.equal(binding.guideVersion, 1);
+    assert.equal(binding.teachingRows + binding.sealedRows, active.validRows);
+    assert.match(binding.integrityHash, /^[0-9a-f]{64}$/);
+
+    assert.equal((await call("historical.exists", { datasetId: a.datasetId })).body.data.exists, true);
+    assert.equal(
+      (await call("historical.exists", { datasetId: "00000000-0000-0000-0000-000000000000" })).body.data.exists,
+      false,
+    );
+
+    // Import B replacing A: A is deleted and only B is active.
+    const b = (await importHist("B", { guideVersion: 2, replaceDatasetId: a.datasetId })).body.data;
+    assert.equal(
+      (await call("historical.exists", { datasetId: a.datasetId })).body.data.exists,
+      false,
+      "the replaced dataset is deleted",
+    );
+    assert.equal((await call("historical.active", {})).body.data.datasetId, b.datasetId);
+    const [{ n: activeCount }] = await sql`
+      SELECT count(*)::int AS n FROM netzero.historical_datasets d
+       JOIN netzero.workspaces w ON w.id = d.workspace_id
+       WHERE d.active AND w.name = 'API Test Competition'`;
+    assert.equal(activeCount, 1, "exactly one active historical dataset in this workspace");
+    assert.equal((await call("historical.binding", { datasetId: b.datasetId })).body.data.guideVersion, 2);
+
+    // Deleting the active dataset leaves none active and cascades its rows.
+    await call("historical.delete", { datasetId: b.datasetId });
+    assert.equal((await call("historical.active", {})).body.data, null);
+    assert.equal((await call("historical.exists", { datasetId: b.datasetId })).body.data.exists, false);
+    const [{ n: rowsLeft }] = await sql`
+      SELECT count(*)::int AS n FROM netzero.historical_rows WHERE dataset_id = ${b.datasetId}`;
+    assert.equal(rowsLeft, 0, "cascade removed the rows");
+  });
 }
