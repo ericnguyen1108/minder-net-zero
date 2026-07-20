@@ -51,6 +51,17 @@ function identity(overrides = {}) {
   };
 }
 
+function humanRanking(overrides = {}) {
+  return {
+    rank: 1,
+    totalScore: 168,
+    markCount: 2,
+    coverageComplete: true,
+    rankingValid: true,
+    ...overrides,
+  };
+}
+
 test("saveFinalDecision posts the record action with the client decision value and decider name", async () => {
   const calls = stubFetch(() => ({ body: { ok: true, data: { ok: true } } }));
   await saveFinalDecision({
@@ -93,6 +104,9 @@ test("clearFinalDecision posts the clear action keyed by application row", async
   assert.equal(calls.length, 1);
   assert.equal(calls[0].action, "decisions.clear");
   assert.deepEqual(calls[0].payload, { applicationRowId: "row-2" });
+
+  await clearFinalDecision("run-1", "row-3", " Vy ");
+  assert.deepEqual(calls[1].payload, { applicationRowId: "row-3", decidedByName: "Vy" });
 });
 
 test("loadFinalDecisions stamps the run id, keeps only valid values, and tolerates a bad body", async () => {
@@ -130,11 +144,13 @@ test("CSV export escapes quotes, guards formula injection, and keeps table order
       identity: identity({ rowId: "row-2", externalId: "APP-002", teamName: "=HYPERLINK(evil)" }),
       assessment: { humanReviewReasons: ["Unclear eligibility requires Human Review."] },
       decision: null,
+      humanRanking: humanRanking({ rank: 3, totalScore: 110 }),
     },
     {
       recommendation: recommendation(),
       identity: identity(),
       assessment: { humanReviewReasons: [] },
+      humanRanking: humanRanking(),
       decision: {
         runId: "run-1",
         rowId: "row-1",
@@ -148,6 +164,7 @@ test("CSV export escapes quotes, guards formula injection, and keeps table order
       identity: identity({ rowId: "row-3", externalId: "APP-003", teamName: "Wind, Rain & Co" }),
       assessment: { humanReviewReasons: [] },
       decision: null,
+      humanRanking: humanRanking({ rank: 2, totalScore: 142 }),
     },
   ];
 
@@ -161,7 +178,7 @@ test("CSV export escapes quotes, guards formula injection, and keeps table order
   const lines = csv.trimEnd().split("\r\n");
   assert.equal(lines[0], RESULTS_CSV_HEADER);
   assert.equal(lines.length, 4);
-  assert.match(lines[1], /^APP-001,Solar Collective,Energy,1,84,progressed/);
+  assert.match(lines[1], /^APP-001,Solar Collective,Energy,1,168,2,yes,1,84,progressed/);
   assert.match(lines[2], /"Wind, Rain & Co"/);
   assert.match(lines[3], /'=HYPERLINK\(evil\)/);
   assert.match(lines[3], /human_review/);

@@ -5075,6 +5075,297 @@ select:focus-visible {
   font-size: 11px;
 }
 
+/* Phase F: shared human marking */
+.phase-f-marking {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+}
+
+.phase-f-separation-note {
+  display: grid;
+  gap: 4px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent-dim) 42%, var(--surface-2));
+}
+
+.phase-f-separation-note span,
+.phase-f-roster > p,
+.phase-f-ranking-wrap > div:first-child p {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.phase-f-roster {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.phase-f-roster summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.phase-f-add-reviewer,
+.phase-f-workbench-controls,
+.phase-f-decision-gate {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.phase-f-add-reviewer label,
+.phase-f-workbench-controls label,
+.phase-f-decision-gate label {
+  display: grid;
+  flex: 1;
+  gap: 6px;
+}
+
+.phase-f-add-reviewer label span,
+.phase-f-workbench-controls label span,
+.phase-f-decision-gate label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.phase-f-add-reviewer input,
+.phase-f-workbench-controls select,
+.phase-f-decision-gate select,
+.phase-f-criteria select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.phase-f-roster-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.phase-f-roster-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.phase-f-roster-list span,
+.phase-f-results-table td strong {
+  display: grid;
+  gap: 2px;
+}
+
+.phase-f-roster-list small,
+.phase-f-ranking-wrap td small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.phase-f-workbench {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.phase-f-review-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.phase-f-review-card > header,
+.phase-f-submit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+}
+
+.phase-f-review-card > header h4,
+.phase-f-ranking-wrap h4 {
+  margin: 2px 0;
+  font-size: 18px;
+}
+
+.phase-f-review-card > header span,
+.phase-f-review-card > header small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.phase-f-source-answers {
+  margin: 0 14px 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+
+.phase-f-source-answers summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.phase-f-source-answers div {
+  padding-top: 12px;
+}
+
+.phase-f-source-answers p {
+  margin: 5px 0 0;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+
+.phase-f-criteria {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px;
+}
+
+.phase-f-criteria fieldset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.phase-f-criteria legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 5px;
+  font-weight: 750;
+}
+
+.phase-f-criteria legend em {
+  color: var(--accent);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.phase-f-criteria fieldset > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.phase-f-anchors {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.phase-f-anchors span {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  color: var(--ink-soft);
+  background: var(--surface-1);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+
+.phase-f-anchors b {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.phase-f-criteria label {
+  display: grid;
+  align-content: end;
+  gap: 5px;
+}
+
+.phase-f-criteria label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.phase-f-submit-row {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.phase-f-submit-row span {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.phase-f-ranking-wrap {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.phase-f-decision-gate {
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.phase-f-decision-gate > div {
+  display: grid;
+  gap: 3px;
+}
+
+.phase-f-decision-gate > div span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.phase-f-decision-gate.ready {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent-dim) 32%, transparent);
+}
+
+.phase-f-decision-gate.locked {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.05);
+}
+
+@media (max-width: 760px) {
+  .phase-f-add-reviewer,
+  .phase-f-workbench-controls,
+  .phase-f-decision-gate,
+  .phase-f-submit-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .phase-f-criteria fieldset {
+    grid-template-columns: 1fr;
+  }
+
+  .phase-f-anchors {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Recalibration retry card */
 .phase4-recalibrate-card {
   border-color: var(--line-strong);

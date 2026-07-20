@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   loadCurrentCasesForAi,
   loadCurrentDatasetBinding,
@@ -61,6 +61,8 @@ import {
   sortResultsForExport,
 } from "./phase6-decisions";
 import type { FinalDecision, FinalDecisionValue, ResultsExportRow } from "./phase6-decisions";
+import PilotMarkingWorkspace from "./pilot-marking-workspace";
+import type { PilotRankingRow, PilotReviewer } from "./pilot-marking";
 
 type FullGuideRule = Phase4ApprovedGuide["rules"][number] & {
   sourceNote: string;
@@ -299,7 +301,7 @@ export function SafeguardsWorkspace({
         </main>
         <aside className="phase5-rail">
           <section className="rail-card"><div className="rail-label">Frozen contract</div><dl className="phase5-contract-list"><div><dt>Decision Guide</dt><dd>Version {phase4.guideVersion}</dd></div><div><dt>Practice test</dt><dd>Passed</dd></div><div><dt>Optional patterns</dt><dd>{approvedPatterns}</dd></div><div><dt>AI model</dt><dd>{phase4.modelId}</dd></div><div><dt>Metrics receipt</dt><dd>{shortHash(phase4.metricsHash)}</dd></div></dl></section>
-          <section className="rail-card history-privacy-card"><div className="rail-label">Production boundary</div><h3>Real candidate data is still off</h3><p>Phase 6 must add managed storage, roles, backups and a shared audit trail before this becomes a live competition system.</p></section>
+          <section className="rail-card history-privacy-card"><div className="rail-label">Production boundary</div><h3>Real candidate data is still off</h3><p>Central storage and human marking are built. Live use still waits for a production-shaped Supabase connection, recovery drill, individual accounts and role enforcement.</p></section>
         </aside>
       </div>
     </div>
@@ -339,7 +341,27 @@ export function AssessmentWorkspace({
   const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
   const [preservedInvalidReceipt, setPreservedInvalidReceipt] = useState("");
   const [decisions, setDecisions] = useState<FinalDecision[]>([]);
+  const [decisionReviewers, setDecisionReviewers] = useState<PilotReviewer[]>([]);
+  const [decisionMakerId, setDecisionMakerId] = useState("");
+  const [humanRanking, setHumanRanking] = useState<PilotRankingRow[]>([]);
+  const [humanRankingReady, setHumanRankingReady] = useState(false);
   const pauseRequested = useRef(false);
+
+  const handleRosterChange = useCallback((loaded: PilotReviewer[]) => {
+    setDecisionReviewers(loaded);
+    setDecisionMakerId((current) => {
+      if (loaded.some((reviewer) => reviewer.id === current)) return current;
+      const organiser = loaded.find(
+        (reviewer) => reviewer.displayName.trim().toLocaleLowerCase() === organiserName.trim().toLocaleLowerCase(),
+      );
+      return organiser?.id ?? loaded[0]?.id ?? "";
+    });
+  }, [organiserName]);
+
+  const handleRankingChange = useCallback((loaded: PilotRankingRow[], ready: boolean) => {
+    setHumanRanking(loaded);
+    setHumanRankingReady(ready);
+  }, []);
 
   const identityById = useMemo(
     () => new Map(identities.map((identity) => [identity.rowId, identity])),
@@ -753,6 +775,11 @@ export function AssessmentWorkspace({
     cohortDecisions.forEach((decision) => { counts[decision.decision] += 1; });
     return counts;
   }, [cohortDecisions]);
+  const humanRankingByRowId = useMemo(
+    () => new Map(humanRanking.map((row) => [row.rowId, row])),
+    [humanRanking],
+  );
+  const decisionMaker = decisionReviewers.find((reviewer) => reviewer.id === decisionMakerId) ?? null;
   const orderedResults = useMemo(() => {
     if (!run) return [] as ResultsExportRow[];
     return sortResultsForExport(
@@ -761,16 +788,25 @@ export function AssessmentWorkspace({
         identity: identityById.get(recommendation.rowId) ?? null,
         assessment: assessmentById.get(recommendation.rowId) ?? null,
         decision: decisionByRowId.get(recommendation.rowId) ?? null,
+        humanRanking: humanRankingByRowId.get(recommendation.rowId) ?? null,
       })),
     );
-  }, [run, identityById, assessmentById, decisionByRowId]);
+  }, [run, identityById, assessmentById, decisionByRowId, humanRankingByRowId]);
 
   async function recordDecision(rowId: string, value: FinalDecisionValue | "") {
     if (!run || run.status !== "ready_for_human_review") return;
+    if (!humanRankingReady) {
+      setError("Complete the independent human marking before recording final decisions.");
+      return;
+    }
+    if (!decisionMaker) {
+      setError("Choose the authorised decision maker before recording a final decision.");
+      return;
+    }
     setError("");
     try {
       if (value === "") {
-        await clearFinalDecision(run.id, rowId);
+        await clearFinalDecision(run.id, rowId, decisionMaker.displayName);
         setDecisions((current) => current.filter((decision) => decision.rowId !== rowId));
         return;
       }
@@ -778,7 +814,7 @@ export function AssessmentWorkspace({
         runId: run.id,
         rowId,
         decision: value,
-        decidedBy: organiserName,
+        decidedBy: decisionMaker.displayName,
         decidedAt: new Date().toISOString(),
       };
       await saveFinalDecision(decision);
@@ -792,7 +828,7 @@ export function AssessmentWorkspace({
   }
 
   function exportResultsCsv() {
-    if (!run || run.status !== "ready_for_human_review") return;
+    if (!run || run.status !== "ready_for_human_review" || !humanRankingReady) return;
     const csv = buildResultsCsv(orderedResults);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -827,8 +863,20 @@ export function AssessmentWorkspace({
               <button className="primary-button" type="button" disabled={initializing || busy || connection !== "connected" || run?.status === "invalid" || run?.status === "auditing" || run?.status === "ready_for_human_review"} onClick={() => void startOrResume()}>{busy ? "Processing safely…" : !run ? "Start supervised assessment" : run.status === "complete" ? "Prepare cohort recommendations" : "Resume assessment"}</button>
               {busy ? <button className="secondary-button" type="button" onClick={() => { pauseRequested.current = true; }}>Pause after this batch</button> : null}
             </div>
-            <p className="phase4-note">A full 700-row run needs at least 117 AI requests and may take meaningful time and cost. Closing the tab pauses future batches; completed batches remain saved on this device.</p>
+            <p className="phase4-note">A full 700-row run needs at least 117 AI requests and may take meaningful time and cost. Closing the tab pauses future batches; completed batches remain saved centrally.</p>
           </section>
+
+          {!initializing && cases.length > 0 ? (
+            <PilotMarkingWorkspace
+              cases={cases}
+              identities={identities}
+              guide={guide}
+              guideContentHash={phase4.guideContentHash}
+              referenceRevision={run?.revision ?? 0}
+              onRosterChange={handleRosterChange}
+              onRankingChange={handleRankingChange}
+            />
+          ) : null}
 
           {preservedInvalidReceipt ? <div className="history-alert" role="status"><strong>Fresh supervised run created</strong><p>The failed run receipt {shortHash(preservedInvalidReceipt)} remains preserved. No application text is sent until you explicitly start the new run.</p></div> : null}
 
@@ -883,29 +931,43 @@ export function AssessmentWorkspace({
           {run?.status === "ready_for_human_review" ? <section className="phase5-card phase5-queue-card">
             <div><span className="section-kicker">Final human review</span><h3>Record the final decision for every application</h3><p>Minder&apos;s recommendations are provisional. An authorised person records each final decision; nothing is decided until you decide it. Human Review cases have no rank on purpose — read them first.</p></div>
             <div className="phase5-recommendation-grid"><div><span>Provisional shortlist zone</span><strong>{recommendationCounts.progressed}</strong></div><div><span>Outside provisional zone</span><strong>{recommendationCounts.not_progressed}</strong></div><div><span>Potentially ineligible</span><strong>{recommendationCounts.ineligible}</strong></div><div className="attention"><span>Human Review first</span><strong>{recommendationCounts.human_review}</strong></div></div>
+            <div className={`phase-f-decision-gate ${humanRankingReady ? "ready" : "locked"}`}>
+              <div>
+                <strong>{humanRankingReady ? "Human ranking complete" : "Final decisions are locked"}</strong>
+                <span>{humanRankingReady ? "Choose the authorised decision maker, then record each outcome." : "Every active reviewer must submit every application before decisions or export can continue."}</span>
+              </div>
+              <label>
+                <span>Decision maker</span>
+                <select value={decisionMakerId} onChange={(event) => setDecisionMakerId(event.target.value)} disabled={decisionReviewers.length === 0}>
+                  <option value="">Choose person</option>
+                  {decisionReviewers.map((reviewer) => <option key={reviewer.id} value={reviewer.id}>{reviewer.displayName}{reviewer.active ? " · reviewer" : " · decision only"}</option>)}
+                </select>
+              </label>
+            </div>
             <div className="phase5-decision-summary" role="status">
               <strong>{cohortDecisions.length.toLocaleString()} of {run.cohortRecommendations.length.toLocaleString()} decided</strong>
               <span>{decisionCounts.shortlist} shortlisted · {decisionCounts.waitlist} waitlisted · {decisionCounts.reject} rejected</span>
-              <button className="secondary-button" type="button" onClick={exportResultsCsv}>Export results (CSV)</button>
+              <button className="secondary-button" type="button" disabled={!humanRankingReady} onClick={exportResultsCsv}>Export results (CSV)</button>
             </div>
             <div className="phase5-results-table-wrap">
               <table className="phase5-results-table">
-                <thead><tr><th>Rank</th><th>Team</th><th>ID · Track</th><th>Score</th><th>Minder recommends</th><th>Why</th><th>Final decision</th></tr></thead>
+                <thead><tr><th>Human rank</th><th>Team</th><th>ID · Track</th><th>Human total</th><th>AI reference · not counted</th><th>AI reason</th><th>Final decision</th></tr></thead>
                 <tbody>{orderedResults.map((row) => {
                   const identity = row.identity;
                   const decision = row.decision;
                   const needsHuman = row.recommendation.recommendation === "human_review";
                   return <tr className={needsHuman ? "phase5-row-review" : ""} key={row.recommendation.rowId}>
-                    <td>{row.recommendation.rank ?? "—"}</td>
+                    <td>{humanRankingReady ? row.humanRanking?.rank ?? "—" : "—"}</td>
                     <td><strong>{identity?.teamName || identity?.externalId || "Application"}</strong></td>
                     <td><small>{identity?.externalId}{identity?.track ? ` · ${identity.track}` : ""}</small></td>
-                    <td>{row.recommendation.weightedScore ?? "—"}</td>
-                    <td><span className={`phase5-reco phase5-reco-${row.recommendation.recommendation}`}>{row.recommendation.recommendation.replaceAll("_", " ")}</span></td>
+                    <td>{row.humanRanking?.totalScore ?? "—"}</td>
+                    <td><span className={`phase5-reco phase5-reco-${row.recommendation.recommendation}`}>{row.recommendation.recommendation.replaceAll("_", " ")} · {row.recommendation.weightedScore ?? "no score"}</span></td>
                     <td><small>{row.recommendation.reason.replaceAll("_", " ")}{row.assessment?.humanReviewReasons.length ? ` — ${row.assessment.humanReviewReasons[0]}` : ""}</small></td>
                     <td>
                       <select
                         aria-label={`Final decision for ${identity?.teamName || row.recommendation.rowId}`}
                         value={decision?.decision ?? ""}
+                        disabled={!humanRankingReady || !decisionMaker}
                         onChange={(event) => void recordDecision(row.recommendation.rowId, event.target.value as FinalDecisionValue | "")}
                       >
                         <option value="">Undecided</option>
@@ -917,7 +979,7 @@ export function AssessmentWorkspace({
                 })}</tbody>
               </table>
             </div>
-            <p className="phase4-note">The CSV export includes every application with Minder&apos;s recommendation, its reason, and the recorded human decision — undecided rows export with an empty decision. Applicant-authored text is exported as text, never as spreadsheet formulas.</p>
+            <p className="phase4-note">The CSV export leads with the human rank, total and coverage, then places the AI recommendation in explicitly labelled reference-only columns. Undecided rows export with an empty decision. Applicant-authored text is exported as text, never as spreadsheet formulas.</p>
           </section> : null}
         </main>
         <aside className="phase5-rail">

@@ -236,7 +236,7 @@ A backup that has never been restored is only a hope. Set measurable targets bef
 
 Neon recovery covers the central Decision Guide, current applications, assignments, reviews, decisions, and database audit events. Clerk identity/invitation state and external Vercel/Clerk logs are separate systems; document how each will be reconstructed or retained. A Neon restore does not restore those external systems.
 
-Legacy browser backups are unrelated to this procedure. They cover only the browser-local pilot workspace that created the file, may contain sensitive test text, and must not be treated as a production backup or merged into the central database.
+Legacy setup backups are unrelated to this procedure. They cover only the setup and Decision Guide journey progress from the browser that created the file; they do not contain or restore the pilot's central Postgres cohorts, marks, assessments, audit records, or decisions.
 
 Configure:
 

@@ -13,6 +13,7 @@
 import { requestIsAuthorized } from "../../auth.ts";
 import { createSealedHistoricalDataset, prepareHistoricalDataset } from "../../historical-data.ts";
 import { createCurrentDataset } from "../../current-data.ts";
+import { createPhase4InputFingerprint } from "../../phase4-logic.ts";
 import * as marking from "../../../db/pilot/marking-repository.ts";
 import * as importRepo from "../../../db/pilot/import-repository.ts";
 import * as cal from "../../../db/pilot/calibration-repository.ts";
@@ -87,10 +88,13 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
     // ---- reviewers ------------------------------------------------------
     case "reviewers.list":
       return marking.listReviewers(wsId);
-    case "reviewers.add":
-      return marking.addReviewer(wsId, String(p.displayName));
+    case "reviewers.add": {
+      if (typeof p.displayName !== "string") throw new Error("Enter the reviewer's name.");
+      return marking.addReviewer(wsId, p.displayName);
+    }
     case "reviewers.setActive":
-      await marking.setReviewerActive(String(p.reviewerId), Boolean(p.active));
+      if (typeof p.active !== "boolean") throw new Error("Choose whether the reviewer is active.");
+      await marking.setReviewerActive(wsId, String(p.reviewerId), Boolean(p.active));
       return { ok: true };
 
     // ---- guide ----------------------------------------------------------
@@ -108,6 +112,46 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
     case "guide.approve":
       await marking.approveGuide(String(p.guideVersionId), String(p.reviewerId));
       return { ok: true };
+    case "guide.syncApproved": {
+      if (!isObject(p.guide) || p.guide.status !== "approved" || !Array.isArray(p.guide.rules)) {
+        throw new Error("An approved Decision Guide is required for human marking.");
+      }
+      const selection = isObject(p.guide.selection) ? p.guide.selection : null;
+      const selectionMode = selection?.mode;
+      if (!selection || !["top_n", "minimum_score", "both"].includes(String(selectionMode))) {
+        throw new Error("The approved Decision Guide has no valid selection rule.");
+      }
+      const criteria = p.guide.rules
+        .filter((rule): rule is Record<string, unknown> => isObject(rule) && rule.kind === "criterion")
+        .map((rule, position) => ({
+          ruleId: String(rule.id ?? ""),
+          title: String(rule.title ?? ""),
+          weight: Number(rule.weight),
+          position,
+        }));
+      const contentHash = await createPhase4InputFingerprint(p.guide as never);
+      if (contentHash !== p.contentHash) {
+        throw new Error("The Decision Guide does not match the passed practice-test receipt.");
+      }
+      const shortlistTarget =
+        selectionMode === "top_n" || selectionMode === "both"
+          ? Number(selection.shortlistTarget)
+          : null;
+      const minimumScore =
+        selectionMode === "minimum_score" || selectionMode === "both"
+          ? Number(selection.minimumScore)
+          : null;
+      return marking.syncApprovedGuide(wsId, {
+        version: Number(p.guide.version),
+        rules: p.guide,
+        selectionMode: selectionMode as marking.ApprovedGuide["selectionMode"],
+        shortlistTarget,
+        minimumScore,
+        contentHash,
+        criteria,
+        approvedByName: String(p.guide.approvedBy ?? ""),
+      });
+    }
 
     // ---- historical (calibration input) --------------------------------
     case "historical.import": {
@@ -298,7 +342,14 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       });
       return { ok: true };
     case "marks.submit":
-      return marking.submitMarkSet(wsId, String(p.applicationRowId), String(p.reviewerId));
+      return marking.submitMarkSet(
+        wsId,
+        String(p.applicationRowId),
+        String(p.reviewerId),
+        String(p.guideVersionId),
+      );
+    case "marks.load":
+      return marking.loadMarkSets(wsId);
     case "ranking.load":
       return marking.loadRanking(wsId);
     case "ai.reference":

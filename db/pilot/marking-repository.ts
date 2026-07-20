@@ -24,10 +24,20 @@ export type GuideCriterion = { ruleId: string; title: string; weight: number; po
 export type ApprovedGuide = {
   guideVersionId: string;
   version: number;
+  contentHash: string;
   selectionMode: "top_n" | "minimum_score" | "both";
   shortlistTarget: number | null;
   minimumScore: number | null;
   criteria: GuideCriterion[];
+};
+
+export type MarkSetState = {
+  applicationRowId: string;
+  reviewerId: string;
+  guideVersionId: string;
+  status: "draft" | "submitted";
+  weightedScore: number | null;
+  scores: Record<string, number>;
 };
 
 export type RankingRow = {
@@ -82,9 +92,13 @@ export async function addReviewer(
   displayName: string,
   sql: Sql = pilotSql(),
 ): Promise<Reviewer> {
+  const name = displayName.trim();
+  if (!name || name.length > 120) throw new Error("Enter a reviewer name between 1 and 120 characters.");
   const [row] = await sql<Reviewer[]>`
-    INSERT INTO netzero.reviewers (workspace_id, display_name)
-    VALUES (${workspaceId}, ${displayName})
+    INSERT INTO netzero.reviewers (workspace_id, display_name, active)
+    VALUES (${workspaceId}, ${name}, true)
+    ON CONFLICT (workspace_id, display_name)
+      DO UPDATE SET active = true
     RETURNING id, display_name AS "displayName", active`;
   return row;
 }
@@ -111,7 +125,7 @@ export async function ensureReviewerByName(
   sql: Sql = pilotSql(),
 ): Promise<Reviewer> {
   const name = displayName.trim();
-  if (!name) throw new Error("A reviewer name is required.");
+  if (!name || name.length > 120) throw new Error("A reviewer name is required.");
   const [row] = await sql<Reviewer[]>`
     INSERT INTO netzero.reviewers (workspace_id, display_name, active)
     VALUES (${workspaceId}, ${name}, false)
@@ -122,11 +136,16 @@ export async function ensureReviewerByName(
 }
 
 export async function setReviewerActive(
+  workspaceId: string,
   reviewerId: string,
   active: boolean,
   sql: Sql = pilotSql(),
 ): Promise<void> {
-  await sql`UPDATE netzero.reviewers SET active = ${active} WHERE id = ${reviewerId}`;
+  const rows = await sql`
+    UPDATE netzero.reviewers SET active = ${active}
+     WHERE id = ${reviewerId} AND workspace_id = ${workspaceId}
+    RETURNING id`;
+  if (rows.length === 0) throw new Error("That reviewer is not part of this competition.");
 }
 
 // ------------------------------------------------------------------- guide ---
@@ -139,12 +158,14 @@ export async function loadApprovedGuide(
     {
       guideVersionId: string;
       version: number;
+      contentHash: string;
       selectionMode: ApprovedGuide["selectionMode"];
       shortlistTarget: number | null;
       minimumScore: number | null;
     }[]
   >`
-    SELECT id AS "guideVersionId", version, selection_mode AS "selectionMode",
+    SELECT id AS "guideVersionId", version, content_hash AS "contentHash",
+           selection_mode AS "selectionMode",
            shortlist_target AS "shortlistTarget", minimum_score AS "minimumScore"
       FROM netzero.guide_versions
      WHERE workspace_id = ${workspaceId} AND status = 'approved'
@@ -156,6 +177,142 @@ export async function loadApprovedGuide(
      WHERE guide_version_id = ${guide.guideVersionId}
      ORDER BY position`;
   return { ...guide, criteria };
+}
+
+/**
+ * Copies the browser-approved pilot guide into the human-marking schema.
+ * Content hashes and version numbers are immutable: replaying the same guide is
+ * idempotent, a higher version creates a new approved row, and drift at an
+ * already-approved version fails closed.
+ */
+export async function syncApprovedGuide(
+  workspaceId: string,
+  input: {
+    version: number;
+    rules: unknown;
+    selectionMode: ApprovedGuide["selectionMode"];
+    shortlistTarget: number | null;
+    minimumScore: number | null;
+    contentHash: string;
+    criteria: GuideCriterion[];
+    approvedByName: string;
+  },
+): Promise<ApprovedGuide> {
+  if (!Number.isInteger(input.version) || input.version < 1) {
+    throw new Error("The approved Decision Guide version is invalid.");
+  }
+  if (!/^[0-9a-f]{64}$/.test(input.contentHash)) {
+    throw new Error("The approved Decision Guide receipt is invalid.");
+  }
+  const approverName = input.approvedByName.trim();
+  if (!approverName || approverName.length > 120) {
+    throw new Error("The approved Decision Guide must name its approver.");
+  }
+  if (
+    ((input.selectionMode === "top_n" || input.selectionMode === "both") &&
+      (!Number.isInteger(input.shortlistTarget) || (input.shortlistTarget ?? 0) < 1)) ||
+    ((input.selectionMode === "minimum_score" || input.selectionMode === "both") &&
+      (!Number.isInteger(input.minimumScore) ||
+        (input.minimumScore ?? 0) < 1 ||
+        (input.minimumScore ?? 0) > 100))
+  ) {
+    throw new Error("The approved Decision Guide selection rule is invalid.");
+  }
+  if (
+    input.criteria.length === 0 ||
+    new Set(input.criteria.map((criterion) => criterion.ruleId)).size !== input.criteria.length ||
+    input.criteria.some(
+      (criterion, index) =>
+        !criterion.ruleId.trim() ||
+        !criterion.title.trim() ||
+        !Number.isInteger(criterion.weight) ||
+        criterion.weight < 1 ||
+        criterion.weight > 100 ||
+        criterion.position !== index,
+    ) ||
+    input.criteria.reduce((total, criterion) => total + criterion.weight, 0) !== 100
+  ) {
+    throw new Error("The approved Decision Guide criteria are incomplete or do not total 100%.");
+  }
+
+  return withPilotTransaction(async (tx) => {
+    const [sameVersion] = await tx<
+      { guideVersionId: string; status: "draft" | "approved"; contentHash: string }[]
+    >`
+      SELECT id AS "guideVersionId", status, content_hash AS "contentHash"
+        FROM netzero.guide_versions
+       WHERE workspace_id = ${workspaceId} AND version = ${input.version}
+       FOR UPDATE`;
+
+    if (sameVersion?.status === "approved") {
+      if (sameVersion.contentHash !== input.contentHash) {
+        throw new Error(
+          "This guide version is already approved centrally with different content. Stop and reconcile the Decision Guide.",
+        );
+      }
+      const guide = await loadApprovedGuide(workspaceId, tx);
+      if (!guide || guide.guideVersionId !== sameVersion.guideVersionId) {
+        throw new Error("A newer approved Decision Guide is already active centrally.");
+      }
+      return guide;
+    }
+
+    const [newer] = await tx<{ version: number }[]>`
+      SELECT version FROM netzero.guide_versions
+       WHERE workspace_id = ${workspaceId} AND status = 'approved' AND version > ${input.version}
+       ORDER BY version DESC LIMIT 1`;
+    if (newer) {
+      throw new Error(
+        `Decision Guide version ${newer.version} is already approved centrally; an older browser copy cannot replace it.`,
+      );
+    }
+
+    const [approver] = await tx<Reviewer[]>`
+      INSERT INTO netzero.reviewers (workspace_id, display_name, active)
+      VALUES (${workspaceId}, ${approverName}, false)
+      ON CONFLICT (workspace_id, display_name)
+        DO UPDATE SET display_name = EXCLUDED.display_name
+      RETURNING id, display_name AS "displayName", active`;
+
+    let guideVersionId = sameVersion?.guideVersionId;
+    if (guideVersionId) {
+      await tx`
+        UPDATE netzero.guide_versions SET
+          rules = ${tx.json(JSON.parse(JSON.stringify(input.rules)))},
+          selection_mode = ${input.selectionMode},
+          shortlist_target = ${input.shortlistTarget},
+          minimum_score = ${input.minimumScore},
+          content_hash = ${input.contentHash}
+        WHERE id = ${guideVersionId} AND status = 'draft'`;
+      await tx`DELETE FROM netzero.guide_criteria WHERE guide_version_id = ${guideVersionId}`;
+    } else {
+      const [created] = await tx<{ id: string }[]>`
+        INSERT INTO netzero.guide_versions
+          (workspace_id, version, status, rules, selection_mode, shortlist_target,
+           minimum_score, content_hash)
+        VALUES (${workspaceId}, ${input.version}, 'draft',
+                ${tx.json(JSON.parse(JSON.stringify(input.rules)))}, ${input.selectionMode},
+                ${input.shortlistTarget}, ${input.minimumScore}, ${input.contentHash})
+        RETURNING id`;
+      guideVersionId = created.id;
+    }
+    for (const criterion of input.criteria) {
+      await tx`
+        INSERT INTO netzero.guide_criteria (guide_version_id, rule_id, title, weight, position)
+        VALUES (${guideVersionId}, ${criterion.ruleId}, ${criterion.title},
+                ${criterion.weight}, ${criterion.position})`;
+    }
+    await tx`
+      UPDATE netzero.guide_versions
+         SET status = 'approved', approved_by = ${approver.id}, approved_at = now()
+       WHERE id = ${guideVersionId} AND status = 'draft'`;
+
+    const guide = await loadApprovedGuide(workspaceId, tx);
+    if (!guide || guide.guideVersionId !== guideVersionId) {
+      throw new Error("The approved Decision Guide was not available after saving.");
+    }
+    return guide;
+  });
 }
 
 /**
@@ -227,10 +384,13 @@ export async function approveGuide(
     throw new Error(`Criterion weights must total 100 before approval (currently ${sum.total}).`);
   }
   const rows = await sql`
-    UPDATE netzero.guide_versions
+    UPDATE netzero.guide_versions guide
        SET status = 'approved', approved_by = ${reviewerId}, approved_at = now()
-     WHERE id = ${guideVersionId} AND status = 'draft'
-    RETURNING id`;
+      FROM netzero.reviewers reviewer
+     WHERE guide.id = ${guideVersionId} AND guide.status = 'draft'
+       AND reviewer.id = ${reviewerId}
+       AND reviewer.workspace_id = guide.workspace_id
+    RETURNING guide.id`;
   if (rows.length === 0) throw new Error("No draft guide to approve (already approved or missing).");
 }
 
@@ -254,11 +414,37 @@ export async function upsertMark(
   await withPilotTransaction(async (tx) => {
     const [markSet] = await tx<{ id: string; status: string }[]>`
       INSERT INTO netzero.reviewer_mark_sets
-        (workspace_id, application_row_id, reviewer_id, guide_version_id)
-      VALUES (${input.workspaceId}, ${input.applicationRowId}, ${input.reviewerId}, ${input.guideVersionId})
-      ON CONFLICT (workspace_id, application_row_id, reviewer_id)
+        (workspace_id, current_dataset_id, application_row_id, reviewer_id, guide_version_id)
+      SELECT ${input.workspaceId}, dataset.id, application.row_id, reviewer.id, guide.id
+        FROM netzero.current_datasets dataset
+        JOIN netzero.current_cases application ON application.dataset_id = dataset.id
+        JOIN netzero.reviewers reviewer
+          ON reviewer.id = ${input.reviewerId}
+         AND reviewer.workspace_id = dataset.workspace_id
+         AND reviewer.active
+        JOIN netzero.guide_versions guide
+          ON guide.id = ${input.guideVersionId}
+         AND guide.workspace_id = dataset.workspace_id
+         AND guide.status = 'approved'
+         AND NOT EXISTS (
+           SELECT 1 FROM netzero.guide_versions newer
+            WHERE newer.workspace_id = guide.workspace_id
+              AND newer.status = 'approved'
+              AND newer.version > guide.version
+         )
+        JOIN netzero.guide_criteria criterion
+          ON criterion.guide_version_id = guide.id
+         AND criterion.rule_id = ${input.ruleId}
+       WHERE dataset.workspace_id = ${input.workspaceId}
+         AND dataset.active
+         AND application.row_id = ${input.applicationRowId}
+      ON CONFLICT (workspace_id, current_dataset_id, application_row_id, reviewer_id, guide_version_id)
+        WHERE current_dataset_id IS NOT NULL
         DO UPDATE SET updated_at = now()
       RETURNING id, status`;
+    if (!markSet) {
+      throw new Error("The active application, reviewer or approved guide is not available for marking.");
+    }
     if (markSet.status === "submitted") {
       throw new Error("This reviewer has already submitted marks for this application.");
     }
@@ -278,20 +464,77 @@ export async function submitMarkSet(
   workspaceId: string,
   applicationRowId: string,
   reviewerId: string,
+  guideVersionId: string,
   sql: Sql = pilotSql(),
 ): Promise<{ weightedScore: number }> {
   const [row] = await sql<{ weightedScore: string }[]>`
-    UPDATE netzero.reviewer_mark_sets
+    UPDATE netzero.reviewer_mark_sets mark_set
        SET status = 'submitted'
-     WHERE workspace_id = ${workspaceId}
-       AND application_row_id = ${applicationRowId}
-       AND reviewer_id = ${reviewerId}
-       AND status = 'draft'
-    RETURNING weighted_score AS "weightedScore"`;
+      FROM netzero.current_datasets dataset, netzero.reviewers reviewer
+     WHERE mark_set.workspace_id = ${workspaceId}
+       AND mark_set.current_dataset_id = dataset.id
+       AND dataset.workspace_id = ${workspaceId} AND dataset.active
+       AND mark_set.application_row_id = ${applicationRowId}
+       AND mark_set.reviewer_id = ${reviewerId}
+       AND mark_set.guide_version_id = ${guideVersionId}
+       AND NOT EXISTS (
+         SELECT 1 FROM netzero.guide_versions newer
+          JOIN netzero.guide_versions selected ON selected.id = mark_set.guide_version_id
+         WHERE newer.workspace_id = selected.workspace_id
+           AND newer.status = 'approved'
+           AND newer.version > selected.version
+       )
+       AND reviewer.id = mark_set.reviewer_id
+       AND reviewer.workspace_id = ${workspaceId} AND reviewer.active
+       AND mark_set.status = 'draft'
+    RETURNING mark_set.weighted_score AS "weightedScore"`;
   if (!row) {
     throw new Error("No draft marks to submit for this reviewer and application.");
   }
   return { weightedScore: Number(row.weightedScore) };
+}
+
+/** Draft and submitted marks for the single active current dataset. */
+export async function loadMarkSets(
+  workspaceId: string,
+  sql: Sql = pilotSql(),
+): Promise<MarkSetState[]> {
+  const rows = await sql<
+    (Omit<MarkSetState, "weightedScore"> & { weightedScore: string | null })[]
+  >`
+    SELECT mark_set.application_row_id AS "applicationRowId",
+           mark_set.reviewer_id AS "reviewerId",
+           mark_set.guide_version_id AS "guideVersionId",
+           mark_set.status,
+           mark_set.weighted_score AS "weightedScore",
+           COALESCE(
+             jsonb_object_agg(mark.rule_id, mark.score)
+               FILTER (WHERE mark.rule_id IS NOT NULL),
+             '{}'::jsonb
+           ) AS scores
+      FROM netzero.reviewer_mark_sets mark_set
+      JOIN netzero.current_datasets dataset
+        ON dataset.id = mark_set.current_dataset_id
+       AND dataset.workspace_id = mark_set.workspace_id
+       AND dataset.active
+      JOIN netzero.guide_versions guide
+        ON guide.id = mark_set.guide_version_id
+       AND guide.workspace_id = mark_set.workspace_id
+       AND guide.status = 'approved'
+       AND NOT EXISTS (
+         SELECT 1 FROM netzero.guide_versions newer
+          WHERE newer.workspace_id = guide.workspace_id
+            AND newer.status = 'approved'
+            AND newer.version > guide.version
+       )
+      LEFT JOIN netzero.reviewer_marks mark ON mark.mark_set_id = mark_set.id
+     WHERE mark_set.workspace_id = ${workspaceId}
+     GROUP BY mark_set.id
+     ORDER BY mark_set.application_row_id, mark_set.reviewer_id`;
+  return rows.map((row) => ({
+    ...row,
+    weightedScore: row.weightedScore === null ? null : Number(row.weightedScore),
+  }));
 }
 
 // ----------------------------------------------------------------- ranking ---

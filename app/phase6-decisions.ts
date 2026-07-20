@@ -58,8 +58,15 @@ export async function saveFinalDecision(decision: FinalDecision): Promise<void> 
 
 // runId is workspace-scoped now (see the module header) and kept only for the
 // legacy call signature; the application row identifies the decision.
-export async function clearFinalDecision(runId: string, rowId: string): Promise<void> {
-  await pilot("decisions.clear", { applicationRowId: rowId });
+export async function clearFinalDecision(
+  runId: string,
+  rowId: string,
+  decidedBy = "",
+): Promise<void> {
+  await pilot("decisions.clear", {
+    applicationRowId: rowId,
+    ...(decidedBy.trim() ? { decidedByName: decidedBy.trim() } : {}),
+  });
 }
 
 export async function loadFinalDecisions(runId: string): Promise<FinalDecision[]> {
@@ -95,16 +102,27 @@ export type ResultsExportRow = {
   identity: StoredCurrentIdentity | null;
   assessment: Phase5StoredAssessment | null;
   decision: FinalDecision | null;
+  humanRanking: {
+    rank: number;
+    totalScore: number;
+    markCount: number;
+    coverageComplete: boolean;
+    rankingValid: boolean;
+  } | null;
 };
 
 export const RESULTS_CSV_HEADER = [
   "application_id",
   "team_name",
   "track",
-  "rank",
-  "weighted_score",
-  "minder_recommendation",
-  "recommendation_reason",
+  "human_rank",
+  "human_total_score",
+  "human_review_count",
+  "human_coverage_complete",
+  "ai_reference_rank",
+  "ai_reference_score",
+  "ai_reference_recommendation",
+  "ai_reference_reason",
   "human_review_reasons",
   "final_decision",
   "decided_by",
@@ -117,11 +135,15 @@ export const RESULTS_CSV_HEADER = [
  */
 export function sortResultsForExport(rows: readonly ResultsExportRow[]): ResultsExportRow[] {
   return [...rows].sort((left, right) => {
-    const leftRank = left.recommendation.rank ?? Number.POSITIVE_INFINITY;
-    const rightRank = right.recommendation.rank ?? Number.POSITIVE_INFINITY;
+    const leftRank = left.humanRanking?.rankingValid
+      ? left.humanRanking.rank
+      : Number.POSITIVE_INFINITY;
+    const rightRank = right.humanRanking?.rankingValid
+      ? right.humanRanking.rank
+      : Number.POSITIVE_INFINITY;
     if (leftRank !== rightRank) return leftRank - rightRank;
-    const leftScore = left.recommendation.weightedScore ?? -1;
-    const rightScore = right.recommendation.weightedScore ?? -1;
+    const leftScore = left.humanRanking?.totalScore ?? -1;
+    const rightScore = right.humanRanking?.totalScore ?? -1;
     if (leftScore !== rightScore) return rightScore - leftScore;
     return left.recommendation.rowId.localeCompare(right.recommendation.rowId);
   });
@@ -135,6 +157,10 @@ export function buildResultsCsv(rows: readonly ResultsExportRow[]): string {
         csvField(row.identity?.externalId || row.recommendation.rowId),
         csvField(row.identity?.teamName ?? ""),
         csvField(row.identity?.track ?? ""),
+        csvField(row.humanRanking?.rankingValid ? row.humanRanking.rank : null),
+        csvField(row.humanRanking?.totalScore),
+        csvField(row.humanRanking?.markCount),
+        csvField(row.humanRanking?.coverageComplete ? "yes" : "no"),
         csvField(row.recommendation.rank),
         csvField(row.recommendation.weightedScore),
         csvField(row.recommendation.recommendation),

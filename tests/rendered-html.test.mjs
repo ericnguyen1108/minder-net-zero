@@ -118,8 +118,8 @@ test("removes starter assets and keeps the safety language", async () => {
   await access(root);
 });
 
-test("implements Phase 5 assessment and Phase 6 human decisions with export", async () => {
-  const [page, phase4, storage, phase5, phase5Storage, currentImport, currentData, phase5Api, decisions] = await Promise.all([
+test("implements Phase 5 assessment, Phase F human marking, and final decisions", async () => {
+  const [page, phase4, storage, phase5, phase5Storage, currentImport, currentData, phase5Api, decisions, marking, markingUi] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/phase4-storage.ts", import.meta.url), "utf8"),
@@ -129,6 +129,8 @@ test("implements Phase 5 assessment and Phase 6 human decisions with export", as
     readFile(new URL("../app/current-data.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/phase5/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/phase6-decisions.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/pilot-marking.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/pilot-marking-workspace.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /disabled={!safeguardsApproved} onClick={openApplications}/);
@@ -176,8 +178,19 @@ test("implements Phase 5 assessment and Phase 6 human decisions with export", as
   assert.match(phase5, /Record the final decision for every application/);
   assert.match(phase5, /Export results \(CSV\)/);
   assert.match(phase5, /nothing is decided until you decide it/i);
+  assert.match(phase5, /Final decisions are locked/);
+  assert.match(phase5, /AI reference · not counted/);
+  assert.match(phase5, /disabled={!humanRankingReady \|\| !decisionMaker}/);
   assert.match(decisions, /formula-injection guard/i);
   assert.match(decisions, /decidedBy/);
+  assert.match(decisions, /human_total_score/);
+  assert.match(marking, /humanRankingIsReady/);
+  assert.match(marking, /"marks\.upsert"/);
+  assert.match(marking, /"marks\.submit"/);
+  assert.match(markingUi, /Human marking · authoritative ranking/);
+  assert.match(markingUi, /AI cannot enter this ranking/);
+  assert.match(markingUi, /Add required reviewer/);
+  assert.match(markingUi, /Submit and freeze review/);
   assert.match(phase5Storage, /assessment results are immutable/i);
   assert.match(phase5Storage, /phase5AssessmentSetIsValid/);
   assert.match(currentData, /no candidate will be silently excluded/i);

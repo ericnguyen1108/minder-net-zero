@@ -13,6 +13,7 @@ if (!url) {
   process.env.PILOT_DATABASE_URL = url;
   process.env.MINDER_COMPETITION_NAME = "API Test Competition"; // isolates this test's workspace
   const { POST } = await import("../app/api/pilot/route.ts");
+  const { createPhase4InputFingerprint } = await import("../app/phase4-logic.ts");
   const { pilotSql } = await import("../db/pilot/client.ts");
   const sql = pilotSql();
 
@@ -64,20 +65,26 @@ if (!url) {
     const roster = (await call("reviewers.list", {})).body.data;
     assert.equal(roster.length, 2);
 
-    // guide: draft -> approve -> load
-    const draft = (await call("guide.saveDraft", {
-      rules: { rules: [] }, selectionMode: "both", shortlistTarget: 10, minimumScore: 70,
-      contentHash: "a".repeat(64),
-      criteria: [
-        { ruleId: "impact", title: "Impact", weight: 60, position: 0 },
-        { ruleId: "delivery", title: "Delivery", weight: 40, position: 1 },
+    // Browser-approved guide -> centrally frozen marking copy. The route
+    // recomputes the full-document hash and derives criteria server-side.
+    const guideDocument = {
+      version: 1,
+      status: "approved",
+      approvedBy: "Eric",
+      rules: [
+        { id: "impact", kind: "criterion", title: "Impact", weight: 60 },
+        { id: "delivery", kind: "criterion", title: "Delivery", weight: 40 },
       ],
-    })).body.data;
-    assert.ok(draft.guideVersionId);
-    const approve = await call("guide.approve", { guideVersionId: draft.guideVersionId, reviewerId: eric.id });
-    assert.equal(approve.status, 200);
+      selection: { mode: "both", shortlistTarget: "10", minimumScore: "70" },
+    };
+    const guideHash = await createPhase4InputFingerprint(guideDocument);
+    const firstSync = await call("guide.syncApproved", { guide: guideDocument, contentHash: guideHash });
+    assert.equal(firstSync.status, 200);
+    const secondSync = await call("guide.syncApproved", { guide: guideDocument, contentHash: guideHash });
+    assert.equal(secondSync.body.data.guideVersionId, firstSync.body.data.guideVersionId);
     const guide = (await call("guide.load", {})).body.data;
     assert.equal(guide.criteria.length, 2);
+    assert.equal(guide.contentHash, guideHash);
 
     // historical import: fingerprint + split derived SERVER-SIDE
     const imported = (await call("historical.import", {
@@ -115,9 +122,12 @@ if (!url) {
     for (const reviewer of [eric, trang]) {
       await call("marks.upsert", { applicationRowId: markedRowId, reviewerId: reviewer.id, guideVersionId: guide.guideVersionId, ruleId: "impact", score: 5 });
       await call("marks.upsert", { applicationRowId: markedRowId, reviewerId: reviewer.id, guideVersionId: guide.guideVersionId, ruleId: "delivery", score: 3 });
-      const submit = await call("marks.submit", { applicationRowId: markedRowId, reviewerId: reviewer.id });
+      const submit = await call("marks.submit", { applicationRowId: markedRowId, reviewerId: reviewer.id, guideVersionId: guide.guideVersionId });
       assert.equal(Number(submit.body.data.weightedScore), 84);
     }
+    const markSets = (await call("marks.load", {})).body.data;
+    assert.equal(markSets.length, 2);
+    assert.deepEqual(markSets[0].scores, { impact: 5, delivery: 3 });
     const ranking = (await call("ranking.load", {})).body.data;
     const c1 = ranking.find((r) => r.rowId === markedRowId);
     assert.equal(Number(c1.totalScore), 168);
