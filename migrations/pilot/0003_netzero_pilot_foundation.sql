@@ -72,6 +72,20 @@ BEGIN
   END IF;
 END $$;
 
+-- Supabase's `postgres` migration owner has CREATEROLE but is deliberately not
+-- a superuser. PostgreSQL therefore requires it to be a member of a role before
+-- it can transfer an object to that role. Keep the migration owner as a member
+-- so later migrations can replace/re-own the ranking view without a manual
+-- dashboard bootstrap. Runtime logins are granted netzero_app only.
+DO $$
+BEGIN
+  -- A CREATEROLE owner reports MEMBER through its implicit ADMIN OPTION on a
+  -- role it created, but that alone does not permit SET ROLE on PostgreSQL 16+.
+  IF NOT pg_has_role(current_user, 'netzero_ranking', 'SET') THEN
+    EXECUTE format('GRANT netzero_ranking TO %I', current_user);
+  END IF;
+END $$;
+
 REVOKE ALL ON SCHEMA netzero FROM PUBLIC;
 REVOKE ALL ON SCHEMA netzero_ai FROM PUBLIC;
 GRANT USAGE ON SCHEMA netzero TO netzero_app;
@@ -712,7 +726,12 @@ SELECT
 FROM per_app p
 JOIN roster r USING (workspace_id);
 
+-- A non-superuser may transfer an object only to a role that can CREATE in the
+-- containing schema. Grant that capability only for the ownership handoff.
+GRANT SELECT ON netzero.final_ranking TO netzero_app;
+GRANT CREATE ON SCHEMA netzero TO netzero_ranking;
 ALTER VIEW netzero.final_ranking OWNER TO netzero_ranking;
+REVOKE CREATE ON SCHEMA netzero FROM netzero_ranking;
 
 -- A parallel, clearly-separate reference view that shows AI scores. It lives in
 -- netzero_ai and is NOT owned by netzero_ranking, so it can never be joined
@@ -746,7 +765,6 @@ REVOKE UPDATE, DELETE ON netzero.recalibration_credits FROM netzero_app;
 GRANT SELECT ON netzero.workspaces, netzero.reviewers, netzero.guide_versions,
   netzero.guide_criteria, netzero.current_datasets, netzero.current_cases,
   netzero.reviewer_mark_sets, netzero.reviewer_marks TO netzero_ranking;
-GRANT SELECT ON netzero.final_ranking TO netzero_app;
 GRANT SELECT ON netzero_ai.reference_marking TO netzero_app;
 
 -- netzero_app must not be able to redefine the ranking view or create objects

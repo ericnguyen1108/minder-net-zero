@@ -29,7 +29,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS reviewer_mark_sets_dataset_reviewer_key
 CREATE INDEX IF NOT EXISTS reviewer_mark_sets_active_dataset
   ON netzero.reviewer_mark_sets (workspace_id, current_dataset_id, status);
 
+-- The foundation view is owned by the isolated ranking role. Supabase's
+-- migration owner is deliberately not a superuser, so assume that role for the
+-- drop, then return to the migration owner to create the replacement.
+SET ROLE netzero_ranking;
 DROP VIEW netzero.final_ranking;
+RESET ROLE;
 
 CREATE VIEW netzero.final_ranking AS
 WITH roster AS (
@@ -96,5 +101,7 @@ SELECT
 FROM per_app p
 JOIN roster r USING (workspace_id);
 
-ALTER VIEW netzero.final_ranking OWNER TO netzero_ranking;
 GRANT SELECT ON netzero.final_ranking TO netzero_app;
+GRANT CREATE ON SCHEMA netzero TO netzero_ranking;
+ALTER VIEW netzero.final_ranking OWNER TO netzero_ranking;
+REVOKE CREATE ON SCHEMA netzero FROM netzero_ranking;
