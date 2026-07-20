@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { IDBKeyRange, indexedDB } from "fake-indexeddb";
 import {
-  CURRENT_CASES_STORE,
   createCurrentDataset,
   currentDatasetExists,
   deleteCurrentDataset,
@@ -14,10 +12,6 @@ import {
   sanitizeCurrentImportSummary,
   saveCurrentDataset,
 } from "../app/current-data.ts";
-import { PHASE5_RUNS_STORE } from "../app/historical-data.ts";
-
-globalThis.indexedDB = indexedDB;
-globalThis.IDBKeyRange = IDBKeyRange;
 
 const columns = [
   { key: "id", label: "Application ID", index: 0 },
@@ -53,14 +47,6 @@ function makeTable(rows, customColumns = columns) {
     rows,
     rowNumbers: rows.map((_, index) => index + 2),
   };
-}
-
-function transactionDone(transaction) {
-  return new Promise((resolve, reject) => {
-    transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(transaction.error ?? new Error("aborted"));
-    transaction.onerror = () => reject(transaction.error ?? new Error("failed"));
-  });
 }
 
 test("prepares all 700 applications, preserves leading-zero IDs and keeps duplicate text/team as warnings", () => {
@@ -238,174 +224,49 @@ test("creates deterministic fingerprints with random opaque row IDs and separate
   assert.ok(first.cases.every((item) => !rows.some((row) => row.id === item.rowId)));
 });
 
-test("atomically stores 700 cases and exposes identity-free AI rows", async () => {
-  const dataset = await createCurrentDataset({
-    datasetId: "current-stored-700",
-    fileName: "current-700.csv",
-    fileSize: 500_000,
-    table: makeTable(makeRows(700)),
-    mapping,
-  });
-  await saveCurrentDataset(dataset);
-
-  assert.equal(await currentDatasetExists(dataset.metadata.id), true);
-  const active = await loadActiveCurrentSummary();
-  assert.equal(active.datasetId, dataset.metadata.id);
-  assert.equal(active.totalRows, 700);
-  const safeCases = await loadCurrentCasesForAi(dataset.metadata.id);
-  assert.equal(safeCases.length, 700);
-  assert.ok(
-    safeCases.every(
-      (item) => JSON.stringify(Object.keys(item).sort()) === JSON.stringify(["answers", "rowId"]),
-    ),
-  );
-  assert.ok(
-    safeCases.every(
-      (item) =>
-        !("externalId" in item) &&
-        !("teamName" in item) &&
-        !("track" in item) &&
-        !("sourceRowNumber" in item) &&
-        !("contentHash" in item),
-    ),
-  );
-  const identities = await loadCurrentIdentitiesForReview(dataset.metadata.id);
-  assert.equal(identities.length, 700);
-  assert.equal(identities[0].externalId, "APP-00001");
-  assert.ok(identities.every((item) => !("answers" in item)));
-  const binding = await loadCurrentDatasetBinding(dataset.metadata.id);
-  assert.deepEqual(binding, {
-    datasetId: dataset.metadata.id,
-    datasetFingerprint: dataset.metadata.datasetFingerprint,
-    integrityHash: dataset.metadata.integrityHash,
-    totalRows: 700,
-  });
-
-  await deleteCurrentDataset(dataset.metadata.id);
-  assert.equal(await currentDatasetExists(dataset.metadata.id), false);
-  assert.equal(await loadActiveCurrentSummary(), null);
-});
-
-test("replaces the active dataset atomically and refuses an in-place immutable overwrite", async () => {
-  const original = await createCurrentDataset({
-    datasetId: "current-replace-original",
-    fileName: "original.csv",
-    fileSize: 1_000,
-    table: makeTable(makeRows(3)),
-    mapping,
-  });
-  await saveCurrentDataset(original);
-
-  const conflicting = await createCurrentDataset({
-    datasetId: original.metadata.id,
-    fileName: "conflicting.csv",
-    fileSize: 1_100,
-    table: makeTable(makeRows(4)),
-    mapping,
-  });
-  await assert.rejects(() => saveCurrentDataset(conflicting), /constraint|cancelled|failed/i);
-  assert.equal((await loadActiveCurrentSummary()).datasetId, original.metadata.id);
-
-  const replacementRows = makeRows(4);
-  replacementRows[0].solution = "A corrected replacement application response.";
-  const replacement = await createCurrentDataset({
-    datasetId: "current-replace-new",
-    fileName: "replacement.csv",
-    fileSize: 1_200,
-    table: makeTable(replacementRows),
-    mapping,
-  });
-  await saveCurrentDataset(replacement, original.metadata.id);
-  assert.equal(await currentDatasetExists(original.metadata.id), false);
-  assert.equal(await currentDatasetExists(replacement.metadata.id), true);
-  assert.equal((await loadActiveCurrentSummary()).datasetId, replacement.metadata.id);
-  await deleteCurrentDataset(replacement.metadata.id);
-});
-
-test("supersedes but never deletes applications once an assessment run references them", async () => {
-  const original = await createCurrentDataset({
-    datasetId: "current-run-locked",
-    fileName: "locked.csv",
-    fileSize: 1_000,
-    table: makeTable(makeRows(3)),
-    mapping,
-  });
-  await saveCurrentDataset(original);
-
-  const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 6);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  const addRun = database.transaction(PHASE5_RUNS_STORE, "readwrite");
-  addRun.objectStore(PHASE5_RUNS_STORE).add({
-    id: "phase5-current-run-locked-test",
-    datasetId: original.metadata.id,
-  });
-  await transactionDone(addRun);
-  database.close();
-
-  const replacement = await createCurrentDataset({
-    datasetId: "current-run-locked-replacement",
-    fileName: "replacement.csv",
-    fileSize: 1_100,
-    table: makeTable(makeRows(4)),
-    mapping,
-  });
-  await saveCurrentDataset(replacement, original.metadata.id);
-  await assert.rejects(
-    () => deleteCurrentDataset(original.metadata.id),
-    /assessment run cannot be removed/i,
-  );
-  assert.equal(await currentDatasetExists(original.metadata.id), true);
-  assert.equal(await currentDatasetExists(replacement.metadata.id), true);
-  assert.equal((await loadActiveCurrentSummary()).datasetId, replacement.metadata.id);
-
-  const cleanup = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 6);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  const removeRun = cleanup.transaction(PHASE5_RUNS_STORE, "readwrite");
-  removeRun.objectStore(PHASE5_RUNS_STORE).delete("phase5-current-run-locked-test");
-  await transactionDone(removeRun);
-  cleanup.close();
-  await deleteCurrentDataset(original.metadata.id);
-  await deleteCurrentDataset(replacement.metadata.id);
-});
-
-test("fails closed when stored answer text is changed after sealing", async () => {
-  const dataset = await createCurrentDataset({
-    datasetId: "current-tampered",
-    fileName: "tampered.csv",
-    fileSize: 1_000,
-    table: makeTable(makeRows(3)),
-    mapping,
-  });
-  await saveCurrentDataset(dataset);
-  const database = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("minder-net-zero-private-v1", 6);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  const transaction = database.transaction(CURRENT_CASES_STORE, "readwrite");
-  const store = transaction.objectStore(CURRENT_CASES_STORE);
-  const storedCase = await new Promise((resolve, reject) => {
-    const request = store.get([dataset.metadata.id, dataset.cases[0].rowId]);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  storedCase.answers[0].value = "Text changed after the dataset was sealed.";
-  store.put(storedCase);
-  await transactionDone(transaction);
-  database.close();
-
-  assert.equal(await currentDatasetExists(dataset.metadata.id), false);
-  await assert.rejects(
-    () => loadCurrentCasesForAi(dataset.metadata.id),
-    /integrity check/i,
-  );
-  await deleteCurrentDataset(dataset.metadata.id);
+test("current storage functions use the authenticated pilot transport", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  const summary = {
+    status: "ready", datasetId: "00000000-0000-4000-8000-000000000001",
+    fileName: "current.csv", fileSize: 1000, sheetName: "Applications",
+    importedAt: "2026-07-20T00:00:00.000Z", totalRows: 1, readyRows: 1,
+    blockedRows: 0, warningRows: 0, identicalTextRows: 0, repeatedTeamRows: 0,
+    datasetFingerprint: "a".repeat(64),
+  };
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push(body);
+    const data = {
+      "current.import": { datasetId: summary.datasetId, fingerprint: summary.datasetFingerprint, summary },
+      "current.exists": { exists: true },
+      "current.active": summary,
+      "current.aiCases": [{ rowId: "case-1", answers: [{ heading: "Impact", value: "Evidence" }] }],
+      "current.identities": [{ datasetId: summary.datasetId, rowId: "case-1", sourceRowNumber: 2, externalId: "APP-1", teamName: "Team", track: "Energy", warnings: [] }],
+      "current.binding": { datasetId: summary.datasetId, datasetFingerprint: summary.datasetFingerprint, integrityHash: "b".repeat(64), totalRows: 1 },
+      "current.delete": { ok: true },
+    }[body.action];
+    return Response.json({ ok: true, data });
+  };
+  try {
+    const saved = await saveCurrentDataset({
+      fileName: "current.csv", fileSize: 1000, table: makeTable(makeRows(1)), mapping,
+    });
+    assert.deepEqual(saved.summary, summary);
+    assert.equal(await currentDatasetExists(summary.datasetId), true);
+    assert.deepEqual(await loadActiveCurrentSummary(), summary);
+    assert.equal((await loadCurrentCasesForAi(summary.datasetId))[0].rowId, "case-1");
+    assert.equal((await loadCurrentIdentitiesForReview(summary.datasetId))[0].externalId, "APP-1");
+    assert.equal((await loadCurrentDatasetBinding(summary.datasetId)).totalRows, 1);
+    await deleteCurrentDataset(summary.datasetId);
+    assert.deepEqual(calls.map((call) => call.action), [
+      "current.import", "current.exists", "current.active", "current.aiCases",
+      "current.identities", "current.binding", "current.delete",
+    ]);
+    assert.ok(!JSON.stringify(calls[3]).includes("Team"), "AI request contains only the dataset id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("sanitizes untrusted current-import summaries and never marks an unbound summary ready", () => {

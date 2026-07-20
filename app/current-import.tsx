@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   EMPTY_CURRENT_IMPORT,
-  createCurrentDataset,
   deleteCurrentDataset,
   isSensitiveAssessmentHeading,
   prepareCurrentDataset,
@@ -264,15 +263,14 @@ export function CurrentImportBuilder({
     setSaving(true);
     setError("");
     try {
-      if (navigator.storage?.persist) await navigator.storage.persist();
-      const dataset = await createCurrentDataset({
+      const saved = await saveCurrentDataset({
         fileName: workbook.fileName,
         fileSize: workbook.fileSize,
         table,
         mapping,
+        replaceDatasetId: replacing ? summary.datasetId : null,
       });
-      await saveCurrentDataset(dataset, replacing ? summary.datasetId : null);
-      onSummaryChange(dataset.metadata.summary);
+      onSummaryChange(saved.summary);
       if (superseding) onSupersededDataset();
       setWorkbook(null);
       setReplacing(false);
@@ -291,7 +289,7 @@ export function CurrentImportBuilder({
 
   async function removeDataset() {
     if (!summary.datasetId || assessmentStarted) return;
-    if (!window.confirm("Remove these current applications from this browser?")) return;
+    if (!window.confirm("Remove these current applications from Minder?")) return;
     setRemoving(true);
     setError("");
     try {
@@ -351,7 +349,7 @@ export function CurrentImportBuilder({
           ) : null}
           <div className="wizard-actions">
             <button className="secondary-button" type="button" disabled={assessmentStarted || removing} onClick={() => { setReplacing(true); setStage("file"); }}>Replace file</button>
-            <button className="danger-button" type="button" disabled={assessmentStarted || removing} onClick={() => void removeDataset()}>{removing ? "Removing…" : "Remove from this device"}</button>
+            <button className="danger-button" type="button" disabled={assessmentStarted || removing} onClick={() => void removeDataset()}>{removing ? "Removing…" : "Remove applications"}</button>
             {assessmentInvalid ? <button className="secondary-button" type="button" onClick={() => { setSuperseding(true); setStage("file"); setError(""); }}>Import corrected set as new</button> : null}
             <button className="primary-button" type="button" onClick={onContinue}>Continue to supervised assessment <span aria-hidden="true">→</span></button>
           </div>
@@ -359,10 +357,10 @@ export function CurrentImportBuilder({
         <aside className="history-rail">
           <section className="rail-card history-privacy-card">
             <div className="rail-label">Pilot limitation</div>
-            <h3>Device-local test data only</h3>
-            <p>This browser is not a shared, backed-up candidate database. Do not use live competition data in this phase.</p>
+            <h3>Private pilot data only</h3>
+            <p>Applications are now saved centrally, but this pilot does not yet provide the full individual-role controls required for a live competition.</p>
           </section>
-          <section className="rail-card"><div className="rail-label">What goes to AI</div><p>Only opaque case IDs and the answer columns you approved. Team name, application ID and track stay local.</p></section>
+          <section className="rail-card"><div className="rail-label">What goes to AI</div><p>Only opaque case IDs and the answer columns you approved. Team name, application ID and track stay in the separate organiser-only identity store.</p></section>
         </aside>
       </div>
     );
@@ -381,7 +379,7 @@ export function CurrentImportBuilder({
           <span className="guide-status guide-status-draft">No AI in this step</span>
         </div>
         {summary.status === "missing" ? (
-          <div className="history-alert history-alert-danger" role="alert"><strong>The saved file is no longer available.</strong><p>Choose the original export again. Minder will not treat missing browser data as ready.</p></div>
+          <div className="history-alert history-alert-danger" role="alert"><strong>The saved application set is no longer available.</strong><p>Choose the original export again. Minder will not treat missing server data as ready.</p></div>
         ) : null}
         {workbook ? <div className="history-alert import-draft-alert"><strong>Keep this tab open.</strong><p>This draft is not saved until “Check & freeze” is complete.</p></div> : null}
         {replacing ? <div className="history-alert"><strong>The existing frozen set stays active until its replacement is safely saved.</strong></div> : null}
@@ -435,9 +433,9 @@ export function CurrentImportBuilder({
       <aside className="history-rail">
         <section className="rail-card history-privacy-card">
           <div className="rail-label">Privacy in this pilot</div>
-          <h3>Checked on this device</h3>
-          <p>The file is not uploaded during import. Only selected answers are kept with opaque IDs; identity stays in a separate local store.</p>
-          <div className="prototype-warning"><strong>Not production storage</strong><p>Use only dummy or deliberately de-identified data. Device storage can be cleared and is not backed up.</p></div>
+          <h3>Separated before assessment</h3>
+          <p>Minder saves approved answers with opaque IDs and keeps application identity in a separate organiser-only store.</p>
+          <div className="prototype-warning"><strong>Still a controlled pilot</strong><p>Use only dummy or deliberately de-identified data until individual accounts and role controls are enabled.</p></div>
         </section>
         <section className="rail-card"><div className="rail-label">Important</div><p>Names, emails or other personal data written inside free-text answers are not automatically removed.</p></section>
         <section className="rail-card"><div className="rail-label">No silent exclusions</div><p>All source rows must be corrected before this set can be frozen. Minder will not quietly drop a candidate.</p></section>
@@ -513,7 +511,7 @@ function ColumnsStage({
         {workbook.sheets.length > 1 ? <label>Worksheet<select value={sheetIndex} onChange={(event) => onChooseSheet(Number(event.target.value))}>{workbook.sheets.map((sheet, index) => <option value={index} key={sheet.sheetName}>{sheet.sheetName}</option>)}</select></label> : <span>Worksheet: {table.sheetName}</span>}
       </div>
       <div className="column-map-grid current-column-grid">
-        <ColumnSelect label="Application ID" required value={mapping.applicationId} columns={table.columns} onChange={(value) => update("applicationId", value)} help="Required; identity stays local and is never sent to AI" />
+        <ColumnSelect label="Application ID" required value={mapping.applicationId} columns={table.columns} onChange={(value) => update("applicationId", value)} help="Required; identity is stored separately and is never sent to AI" />
         <ColumnSelect label="Team or application name" value={mapping.teamName} columns={table.columns} onChange={(value) => update("teamName", value)} help="Optional; shown later to human reviewers only" />
         <ColumnSelect label="Track or category" value={mapping.track} columns={table.columns} onChange={(value) => update("track", value)} help="Optional; not used or sent for assessment" />
       </div>
@@ -587,7 +585,7 @@ function CheckStage({
       {prepared.sealBlockers.length ? <div className="history-alert history-alert-danger" role="alert"><strong>This set cannot be frozen yet.</strong><ul>{prepared.sealBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <div className="seal-preview"><div className="seal-icon" aria-hidden="true">◎</div><div><span className="section-kicker">Complete set</span><h4>{prepared.totalRows.toLocaleString()} source rows = {prepared.readyRows.length.toLocaleString()} frozen applications</h4><p>Opaque case IDs will be created. Application ID, team name and track stay in a separate identity store.</p></div></div>}
       <div className="seal-confirmations">
         {prepared.warningRows ? <label className="approval-checkbox"><input type="checkbox" checked={warningsConfirmed} onChange={(event) => onWarningsConfirmed(event.target.checked)} /><span><strong>I reviewed every warning</strong><small>Identical text and repeated teams remain visible for human review.</small></span></label> : null}
-        <label className="approval-checkbox"><input type="checkbox" checked={storageConfirmed} onChange={(event) => onStorageConfirmed(event.target.checked)} /><span><strong>I am using test or deliberately de-identified data</strong><small>Current applications and Phase 5 results are still device-local and are not centrally backed up yet. Free-text personal data is not automatically removed.</small></span></label>
+        <label className="approval-checkbox"><input type="checkbox" checked={storageConfirmed} onChange={(event) => onStorageConfirmed(event.target.checked)} /><span><strong>I am using test or deliberately de-identified data</strong><small>Current applications and Phase 5 results are centrally saved, but this pilot is not yet approved for live personal data. Free-text personal data is not automatically removed.</small></span></label>
       </div>
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
       <WizardActions onBack={onBack} onContinue={onFreeze} continueLabel={saving ? "Freezing safely…" : "Freeze all applications"} disabled={!prepared.canSeal || (prepared.warningRows > 0 && !warningsConfirmed) || !storageConfirmed || saving} />

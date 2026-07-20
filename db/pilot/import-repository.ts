@@ -16,6 +16,12 @@
  */
 
 import type { HistoricalImportSummary, SealedHistoricalDataset } from "../../app/historical-data.ts";
+import type {
+  CurrentDatasetBinding,
+  CurrentImportSummary,
+  SealedCurrentDataset,
+  StoredCurrentIdentity,
+} from "../../app/current-data.ts";
 import type { Sql } from "./client.ts";
 import { pilotSql, withPilotTransaction } from "./client.ts";
 
@@ -205,6 +211,134 @@ export async function freezeCurrentDataset(
   });
 }
 
+/**
+ * Persists an API-sealed current dataset and makes it the active set. A replaced
+ * dataset is deleted only when no Phase 5 run references it; otherwise it is
+ * retained as an immutable audit input and merely superseded.
+ */
+export async function saveCurrentDataset(
+  workspaceId: string,
+  sealed: SealedCurrentDataset,
+  replaceDatasetId?: string | null,
+): Promise<{ datasetId: string; fingerprint: string; summary: CurrentImportSummary }> {
+  return withPilotTransaction(async (tx) => {
+    const md = sealed.metadata;
+    if (replaceDatasetId) {
+      const [owned] = await tx<{ one: number }[]>`
+        SELECT 1 AS one FROM netzero.current_datasets
+         WHERE id = ${replaceDatasetId} AND workspace_id = ${workspaceId}`;
+      if (owned) {
+        const [referenced] = await tx<{ one: number }[]>`
+          SELECT 1 AS one FROM netzero_ai.assessment_runs
+           WHERE current_dataset_id = ${replaceDatasetId} LIMIT 1`;
+        if (!referenced) {
+          await tx`
+            DELETE FROM netzero.current_datasets
+             WHERE id = ${replaceDatasetId} AND workspace_id = ${workspaceId}`;
+        }
+      }
+    }
+    await tx`
+      UPDATE netzero.current_datasets SET active = false
+       WHERE workspace_id = ${workspaceId} AND active`;
+    await tx`
+      INSERT INTO netzero.current_datasets
+        (id, workspace_id, name, fingerprint, integrity_hash, case_count,
+         metadata, active, frozen_at)
+      VALUES (${md.id}, ${workspaceId}, ${md.sourceName}, ${md.datasetFingerprint},
+              ${md.integrityHash}, ${sealed.cases.length}, ${tx.json(md as never)},
+              true, ${md.importedAt})`;
+    for (const currentCase of sealed.cases) {
+      await tx`
+        INSERT INTO netzero.current_cases
+          (dataset_id, row_id, answers, content_hash)
+        VALUES (${md.id}, ${currentCase.rowId}, ${tx.json(currentCase.answers as never)},
+                ${currentCase.contentHash})`;
+    }
+    for (const identity of sealed.identities) {
+      await tx`
+        INSERT INTO netzero.current_identities (dataset_id, row_id, identity)
+        VALUES (${md.id}, ${identity.rowId}, ${tx.json(identity as never)})`;
+    }
+    return {
+      datasetId: md.id,
+      fingerprint: md.datasetFingerprint,
+      summary: md.summary,
+    };
+  });
+}
+
+export async function loadActiveCurrentSummary(
+  workspaceId: string,
+  sql: Sql = pilotSql(),
+): Promise<CurrentImportSummary | null> {
+  const [row] = await sql<{ summary: CurrentImportSummary | null }[]>`
+    SELECT metadata -> 'summary' AS summary
+      FROM netzero.current_datasets
+     WHERE workspace_id = ${workspaceId} AND active
+     ORDER BY frozen_at DESC LIMIT 1`;
+  return row?.summary ?? null;
+}
+
+export async function currentDatasetExists(
+  workspaceId: string,
+  datasetId: string,
+  sql: Sql = pilotSql(),
+): Promise<boolean> {
+  const [row] = await sql<{ one: number }[]>`
+    SELECT 1 AS one FROM netzero.current_datasets
+     WHERE id = ${datasetId} AND workspace_id = ${workspaceId}
+       AND metadata IS NOT NULL AND integrity_hash IS NOT NULL`;
+  return Boolean(row);
+}
+
+export async function loadCurrentDatasetBinding(
+  workspaceId: string,
+  datasetId: string,
+  sql: Sql = pilotSql(),
+): Promise<CurrentDatasetBinding | null> {
+  const [row] = await sql<CurrentDatasetBinding[]>`
+    SELECT id AS "datasetId", fingerprint AS "datasetFingerprint",
+           integrity_hash AS "integrityHash", case_count AS "totalRows"
+      FROM netzero.current_datasets
+     WHERE id = ${datasetId} AND workspace_id = ${workspaceId}
+       AND metadata IS NOT NULL AND integrity_hash IS NOT NULL`;
+  return row ?? null;
+}
+
+export async function loadCurrentIdentitiesForReview(
+  workspaceId: string,
+  datasetId: string,
+  sql: Sql = pilotSql(),
+): Promise<StoredCurrentIdentity[]> {
+  const rows = await sql<{ identity: StoredCurrentIdentity }[]>`
+    SELECT ci.identity
+      FROM netzero.current_identities ci
+      JOIN netzero.current_datasets cd ON cd.id = ci.dataset_id
+     WHERE ci.dataset_id = ${datasetId} AND cd.workspace_id = ${workspaceId}
+     ORDER BY (ci.identity ->> 'sourceRowNumber')::integer, ci.row_id`;
+  return rows.map((row) => row.identity);
+}
+
+export async function deleteCurrentDataset(
+  workspaceId: string,
+  datasetId: string,
+): Promise<void> {
+  await withPilotTransaction(async (tx) => {
+    const [referenced] = await tx<{ one: number }[]>`
+      SELECT 1 AS one FROM netzero_ai.assessment_runs ar
+      JOIN netzero.current_datasets cd ON cd.id = ar.current_dataset_id
+       WHERE ar.current_dataset_id = ${datasetId} AND cd.workspace_id = ${workspaceId}
+       LIMIT 1`;
+    if (referenced) {
+      throw new Error("Applications referenced by an assessment run cannot be removed.");
+    }
+    await tx`
+      DELETE FROM netzero.current_datasets
+       WHERE id = ${datasetId} AND workspace_id = ${workspaceId}`;
+  });
+}
+
 /** AI-visible: answer text only, never identity. */
 export async function loadCurrentCasesForAi(datasetId: string, sql: Sql = pilotSql()): Promise<BlindCase[]> {
   return sql<BlindCase[]>`
@@ -212,6 +346,20 @@ export async function loadCurrentCasesForAi(datasetId: string, sql: Sql = pilotS
       FROM netzero.current_cases
      WHERE dataset_id = ${datasetId}
      ORDER BY row_id`;
+}
+
+/** Workspace-scoped AI view used by the authenticated API boundary. */
+export async function loadCurrentCasesForAiInWorkspace(
+  workspaceId: string,
+  datasetId: string,
+  sql: Sql = pilotSql(),
+): Promise<BlindCase[]> {
+  return sql<BlindCase[]>`
+    SELECT cc.row_id AS "rowId", cc.answers
+      FROM netzero.current_cases cc
+      JOIN netzero.current_datasets cd ON cd.id = cc.dataset_id
+     WHERE cc.dataset_id = ${datasetId} AND cd.workspace_id = ${workspaceId}
+     ORDER BY cc.row_id`;
 }
 
 /** Identity is read separately, only when a human needs to see who a row is. */

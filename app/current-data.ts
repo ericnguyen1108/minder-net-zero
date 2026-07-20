@@ -1,13 +1,8 @@
-import {
-  PHASE5_RUNS_STORE,
-  historicalMatchKey,
-  normalizeHistoricalValue,
-  openDatabase,
-  transactionComplete,
-} from "./historical-data.ts";
+import { historicalMatchKey, normalizeHistoricalValue } from "./historical-data.ts";
 import { isSensitiveAssessmentHeading } from "./assessment-safety.ts";
 export { isSensitiveAssessmentHeading } from "./assessment-safety.ts";
 import type { SourceTable } from "./historical-data.ts";
+import { pilot } from "./pilot-client.ts";
 
 export const CURRENT_DATASETS_STORE = "current-datasets";
 export const CURRENT_CASES_STORE = "current-cases";
@@ -494,55 +489,20 @@ export async function createCurrentDataset(args: {
   };
 }
 
-function requestResult<T>(request: IDBRequest<T>) {
-  return new Promise<T>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () =>
-      reject(request.error ?? new Error("Private browser storage failed."));
-  });
-}
-
 type StoredDatasetRead = {
   metadata: CurrentDatasetMetadata | undefined;
   cases: StoredCurrentCase[];
   identities: StoredCurrentIdentity[];
 };
 
-function readStoredDataset(database: IDBDatabase, datasetId: string) {
-  return new Promise<StoredDatasetRead>((resolve, reject) => {
-    const transaction = database.transaction(
-      [CURRENT_DATASETS_STORE, CURRENT_CASES_STORE, CURRENT_IDENTITIES_STORE],
-      "readonly",
-    );
-    const metadataRequest = transaction
-      .objectStore(CURRENT_DATASETS_STORE)
-      .get(datasetId) as IDBRequest<CurrentDatasetMetadata | undefined>;
-    const casesRequest = transaction
-      .objectStore(CURRENT_CASES_STORE)
-      .index("datasetId")
-      .getAll(IDBKeyRange.only(datasetId)) as IDBRequest<StoredCurrentCase[]>;
-    const identitiesRequest = transaction
-      .objectStore(CURRENT_IDENTITIES_STORE)
-      .index("datasetId")
-      .getAll(IDBKeyRange.only(datasetId)) as IDBRequest<StoredCurrentIdentity[]>;
-    transaction.oncomplete = () =>
-      resolve({
-        metadata: metadataRequest.result,
-        cases: casesRequest.result,
-        identities: identitiesRequest.result,
-      });
-    transaction.onabort = () =>
-      reject(transaction.error ?? new Error("Private browser storage failed."));
-    transaction.onerror = () =>
-      reject(transaction.error ?? new Error("Private browser storage failed."));
-  });
-}
-
 function allowedWarning(value: unknown): value is CurrentWarningCode {
   return value === "identical-text" || value === "repeated-team";
 }
 
-async function verifyDatasetRecords(datasetId: string, stored: StoredDatasetRead) {
+export async function sealedCurrentDatasetIsValid(
+  datasetId: string,
+  stored: StoredDatasetRead,
+) {
   try {
     const { metadata, cases, identities } = stored;
     if (
@@ -665,192 +625,60 @@ async function verifyDatasetRecords(datasetId: string, stored: StoredDatasetRead
   }
 }
 
-function deleteRowsForDataset(store: IDBObjectStore, datasetId: string) {
-  const request = store.index("datasetId").openCursor(IDBKeyRange.only(datasetId));
-  request.onsuccess = () => {
-    const cursor = request.result;
-    if (!cursor) return;
-    cursor.delete();
-    cursor.continue();
-  };
-}
+export type CurrentDatasetSave = {
+  fileName: string;
+  fileSize: number;
+  table: SourceTable;
+  mapping: CurrentColumnMapping;
+  replaceDatasetId?: string | null;
+};
 
-export async function saveCurrentDataset(
-  dataset: SealedCurrentDataset,
-  replaceDatasetId?: string | null,
-) {
-  if (
-    !(await verifyDatasetRecords(dataset.metadata.id, {
-      metadata: dataset.metadata,
-      cases: dataset.cases,
-      identities: dataset.identities,
-    }))
-  ) {
-    throw new Error("The current-application set did not pass its integrity check.");
-  }
-  if (replaceDatasetId && replaceDatasetId === dataset.metadata.id) {
-    throw new Error("A sealed current-application set is immutable; create a replacement set.");
-  }
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [
-        CURRENT_DATASETS_STORE,
-        CURRENT_CASES_STORE,
-        CURRENT_IDENTITIES_STORE,
-        CURRENT_ACTIVE_STORE,
-        PHASE5_RUNS_STORE,
-      ],
-      "readwrite",
-    );
-    const datasets = transaction.objectStore(CURRENT_DATASETS_STORE);
-    const cases = transaction.objectStore(CURRENT_CASES_STORE);
-    const identities = transaction.objectStore(CURRENT_IDENTITIES_STORE);
-    if (replaceDatasetId) {
-      const referencedRuns = await requestResult(
-        transaction
-          .objectStore(PHASE5_RUNS_STORE)
-          .index("datasetId")
-          .getAllKeys(IDBKeyRange.only(replaceDatasetId)),
-      );
-      if (referencedRuns.length === 0) {
-        datasets.delete(replaceDatasetId);
-        deleteRowsForDataset(cases, replaceDatasetId);
-        deleteRowsForDataset(identities, replaceDatasetId);
-      }
-    }
-    datasets.add(dataset.metadata);
-    dataset.cases.forEach((item) => cases.add(item));
-    dataset.identities.forEach((item) => identities.add(item));
-    transaction.objectStore(CURRENT_ACTIVE_STORE).put({
-      key: "active",
-      datasetId: dataset.metadata.id,
-      summary: dataset.metadata.summary,
-    });
-    await transactionComplete(transaction);
-  } finally {
-    database.close();
-  }
+/** The API re-prepares, hashes and seals the raw current-applications import. */
+export async function saveCurrentDataset(input: CurrentDatasetSave) {
+  return pilot<{
+    datasetId: string;
+    fingerprint: string;
+    summary: CurrentImportSummary;
+  }>("current.import", {
+    fileName: input.fileName,
+    fileSize: input.fileSize,
+    table: input.table,
+    mapping: input.mapping,
+    replaceDatasetId: input.replaceDatasetId ?? null,
+  });
 }
 
 export async function currentDatasetExists(datasetId: string) {
-  const database = await openDatabase();
-  try {
-    return await verifyDatasetRecords(datasetId, await readStoredDataset(database, datasetId));
-  } finally {
-    database.close();
-  }
+  const result = await pilot<{ exists: boolean }>("current.exists", { datasetId });
+  return result.exists;
 }
 
 export async function loadActiveCurrentSummary() {
-  const database = await openDatabase();
-  try {
-    const pointer = await requestResult(
-      database
-        .transaction(CURRENT_ACTIVE_STORE, "readonly")
-        .objectStore(CURRENT_ACTIVE_STORE)
-        .get("active") as IDBRequest<
-        | { key: "active"; datasetId: string; summary: CurrentImportSummary }
-        | undefined
-      >,
-    );
-    if (!pointer?.datasetId) return null;
-    const stored = await readStoredDataset(database, pointer.datasetId);
-    if (!(await verifyDatasetRecords(pointer.datasetId, stored)) || !stored.metadata) {
-      throw new Error("The saved current applications did not pass their integrity check.");
-    }
-    return stored.metadata.summary;
-  } finally {
-    database.close();
-  }
+  return pilot<CurrentImportSummary | null>("current.active");
 }
 
 export async function loadCurrentCasesForAi(datasetId: string): Promise<SafeCurrentCase[]> {
-  const database = await openDatabase();
-  try {
-    const stored = await readStoredDataset(database, datasetId);
-    if (!(await verifyDatasetRecords(datasetId, stored))) {
-      throw new Error("The saved current applications did not pass their integrity check.");
-    }
-    return stored.cases
-      .map((item) => ({
-        rowId: item.rowId,
-        answers: item.answers.map((answer) => ({ ...answer })),
-      }))
-      .sort((left, right) => left.rowId.localeCompare(right.rowId));
-  } finally {
-    database.close();
-  }
+  const rows = await pilot<SafeCurrentCase[]>("current.aiCases", { datasetId });
+  if (!Array.isArray(rows)) throw new Error("The server returned invalid application data.");
+  return rows;
 }
 
 export async function loadCurrentIdentitiesForReview(datasetId: string) {
-  const database = await openDatabase();
-  try {
-    const stored = await readStoredDataset(database, datasetId);
-    if (!(await verifyDatasetRecords(datasetId, stored))) {
-      throw new Error("The saved current applications did not pass their integrity check.");
-    }
-    return stored.identities
-      .map((item) => ({ ...item, warnings: [...item.warnings] }))
-      .sort((left, right) => left.sourceRowNumber - right.sourceRowNumber);
-  } finally {
-    database.close();
-  }
+  const rows = await pilot<StoredCurrentIdentity[]>("current.identities", { datasetId });
+  if (!Array.isArray(rows)) throw new Error("The server returned invalid application identities.");
+  return rows;
 }
 
 export async function loadCurrentDatasetBinding(
   datasetId: string,
 ): Promise<CurrentDatasetBinding> {
-  const database = await openDatabase();
-  try {
-    const stored = await readStoredDataset(database, datasetId);
-    if (!(await verifyDatasetRecords(datasetId, stored)) || !stored.metadata) {
-      throw new Error("The saved current applications did not pass their integrity check.");
-    }
-    return {
-      datasetId,
-      datasetFingerprint: stored.metadata.datasetFingerprint,
-      integrityHash: stored.metadata.integrityHash,
-      totalRows: stored.cases.length,
-    };
-  } finally {
-    database.close();
+  const binding = await pilot<CurrentDatasetBinding | null>("current.binding", { datasetId });
+  if (!binding) {
+    throw new Error("The saved current applications did not pass their integrity check.");
   }
+  return binding;
 }
 
 export async function deleteCurrentDataset(datasetId: string) {
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [
-        CURRENT_DATASETS_STORE,
-        CURRENT_CASES_STORE,
-        CURRENT_IDENTITIES_STORE,
-        CURRENT_ACTIVE_STORE,
-        PHASE5_RUNS_STORE,
-      ],
-      "readwrite",
-    );
-    const referencedRuns = await requestResult(
-      transaction
-        .objectStore(PHASE5_RUNS_STORE)
-        .index("datasetId")
-        .getAllKeys(IDBKeyRange.only(datasetId)),
-    );
-    if (referencedRuns.length > 0) {
-      transaction.abort();
-      throw new Error("Applications referenced by an assessment run cannot be removed.");
-    }
-    transaction.objectStore(CURRENT_DATASETS_STORE).delete(datasetId);
-    deleteRowsForDataset(transaction.objectStore(CURRENT_CASES_STORE), datasetId);
-    deleteRowsForDataset(transaction.objectStore(CURRENT_IDENTITIES_STORE), datasetId);
-    const active = transaction.objectStore(CURRENT_ACTIVE_STORE);
-    const activeRequest = active.get("active");
-    activeRequest.onsuccess = () => {
-      if (activeRequest.result?.datasetId === datasetId) active.delete("active");
-    };
-    await transactionComplete(transaction);
-  } finally {
-    database.close();
-  }
+  await pilot("current.delete", { datasetId });
 }

@@ -51,7 +51,7 @@ export default function BackupControls() {
       const backup = parseWorkspaceBackup(await file.text());
       const confirmed = window.confirm(
         `Replace everything in this browser with the backup (${describeBackup(backup)})?\n\n` +
-          "Close any other Minder Net Zero tabs first. Server-held historical data and calibration are not replaced.",
+          "Close any other Minder Net Zero tabs first. Centrally saved competition data is not replaced.",
       );
       if (!confirmed) return;
       await importWorkspace(backup);
@@ -70,7 +70,7 @@ export default function BackupControls() {
   return (
     <div className="sidebar-backup" aria-label="Browser backup">
       <strong>Data safety</strong>
-      <p>Current applications and Phase 5 work still live in this browser. Historical data and calibration are saved centrally.</p>
+      <p>Competition data is saved centrally. This temporary backup covers only browser setup and journey progress.</p>
       <div className="sidebar-backup-actions">
         <button type="button" onClick={downloadBackup} disabled={busy}>
           Download backup

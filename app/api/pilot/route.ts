@@ -12,6 +12,7 @@
 
 import { requestIsAuthorized } from "../../auth.ts";
 import { createSealedHistoricalDataset, prepareHistoricalDataset } from "../../historical-data.ts";
+import { createCurrentDataset } from "../../current-data.ts";
 import * as marking from "../../../db/pilot/marking-repository.ts";
 import * as importRepo from "../../../db/pilot/import-repository.ts";
 import * as cal from "../../../db/pilot/calibration-repository.ts";
@@ -24,11 +25,6 @@ const WORKSPACE_NAME = process.env.MINDER_COMPETITION_NAME?.trim() || "Minder Ne
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: { "cache-control": "no-store" } });
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -149,19 +145,33 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       return { ok: true };
 
     // ---- current applications ------------------------------------------
-    case "current.freeze": {
-      const cases = (p.cases as importRepo.CurrentCaseInput[]) ?? [];
-      // Fingerprint derived server-side from the sorted case answers.
-      const fingerprintInput = JSON.stringify(
-        [...cases]
-          .map((c) => ({ rowId: c.rowId, answers: c.answers }))
-          .sort((a, b) => a.rowId.localeCompare(b.rowId)),
+    case "current.import": {
+      const sealed = await createCurrentDataset({
+        datasetId: crypto.randomUUID(),
+        fileName: String(p.fileName ?? "current-applications.csv"),
+        fileSize: Number(p.fileSize ?? 0),
+        table: p.table as never,
+        mapping: p.mapping as never,
+      });
+      return importRepo.saveCurrentDataset(
+        wsId,
+        sealed,
+        (p.replaceDatasetId as string | null) ?? null,
       );
-      const fingerprint = await sha256Hex(fingerprintInput);
-      return importRepo.freezeCurrentDataset(wsId, { name: String(p.name ?? "Round"), fingerprint, cases });
     }
     case "current.aiCases":
-      return importRepo.loadCurrentCasesForAi(String(p.datasetId));
+      return importRepo.loadCurrentCasesForAiInWorkspace(wsId, String(p.datasetId));
+    case "current.identities":
+      return importRepo.loadCurrentIdentitiesForReview(wsId, String(p.datasetId));
+    case "current.active":
+      return importRepo.loadActiveCurrentSummary(wsId);
+    case "current.binding":
+      return importRepo.loadCurrentDatasetBinding(wsId, String(p.datasetId));
+    case "current.exists":
+      return { exists: await importRepo.currentDatasetExists(wsId, String(p.datasetId)) };
+    case "current.delete":
+      await importRepo.deleteCurrentDataset(wsId, String(p.datasetId));
+      return { ok: true };
 
     // ---- calibration ----------------------------------------------------
     case "calibration.load":
@@ -192,33 +202,90 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       return cal.consumedState(wsId, String(p.datasetFingerprint));
 
     // ---- AI assessment (reference only) --------------------------------
-    case "assessment.createRun":
-      return asm.createRun({
+    case "assessment.safeguards.save":
+      return asm.saveSafeguardApproval(wsId, p.approval as never);
+    case "assessment.safeguards.load":
+      return asm.loadSafeguardApproval(wsId, String(p.phase4SessionId));
+    case "assessment.document.create":
+      return asm.createPhase5RunDocument({
         workspaceId: wsId,
-        currentDatasetId: String(p.currentDatasetId),
-        guideVersion: Number(p.guideVersion ?? 1),
-        modelId: String(p.modelId),
-        contractHash: String(p.contractHash),
-        protocolHash: String(p.protocolHash),
-        batches: (p.batches as { index: number; inputHash: string }[]) ?? [],
+        run: p.run as never,
+        batches: (p.batches as never[]) ?? [],
       });
-    case "assessment.claim":
-      return asm.claimBatch(String(p.runId), Number(p.batchIndex));
-    case "assessment.commit":
-      return asm.commitBatchResults({
+    case "assessment.document.load":
+      return asm.loadPhase5RunDocument(wsId, String(p.runId));
+    case "assessment.document.latest":
+      return asm.loadLatestPhase5RunDocument(wsId, String(p.datasetId));
+    case "assessment.document.batches":
+      return asm.loadPhase5Batches(wsId, String(p.runId));
+    case "assessment.document.results":
+      return asm.loadPhase5AssessmentResults(wsId, String(p.runId));
+    case "assessment.document.claim":
+      return asm.claimNextPhase5Batch({
+        workspaceId: wsId,
         runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
+        leaseToken: String(p.leaseToken),
+        leaseMilliseconds:
+          p.leaseMilliseconds === undefined ? undefined : Number(p.leaseMilliseconds),
+      });
+    case "assessment.document.commit":
+      return asm.commitPhase5Batch({
+        workspaceId: wsId,
+        runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
         batchId: String(p.batchId),
         leaseToken: String(p.leaseToken),
-        results: (p.results as asm.AssessmentResultInput[]) ?? [],
+        assessments: (p.assessments as never[]) ?? [],
       });
-    case "assessment.fail":
-      await asm.failBatch({ batchId: String(p.batchId), leaseToken: String(p.leaseToken) });
-      return { ok: true };
-    case "assessment.results":
-      return asm.loadResults(String(p.runId));
-    case "assessment.progress":
-      return asm.runProgress(String(p.runId));
-
+    case "assessment.document.fail":
+      return asm.failPhase5BatchDocument({
+        workspaceId: wsId,
+        runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
+        batchId: String(p.batchId),
+        leaseToken: String(p.leaseToken),
+        message: String(p.message ?? ""),
+      });
+    case "assessment.document.pause":
+      return asm.pausePhase5RunDocument({
+        workspaceId: wsId,
+        runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
+      });
+    case "assessment.document.finalize":
+      return asm.finalizePhase5RunDocument({
+        workspaceId: wsId,
+        runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
+        recommendations: (p.recommendations as never[]) ?? [],
+        evidenceSampleIds: (p.evidenceSampleIds as string[]) ?? [],
+      });
+    case "assessment.document.confirmEvidence":
+      return asm.confirmPhase5EvidenceDocument({
+        workspaceId: wsId,
+        runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
+        rowId: String(p.rowId),
+      });
+    case "assessment.document.invalidate": {
+      const invalidated = await asm.invalidatePhase5RunDocument({
+        workspaceId: wsId,
+        runId: String(p.runId),
+        expectedRevision: Number(p.expectedRevision),
+        reason: String(p.reason ?? ""),
+      });
+      try {
+        await cal.grantRecalibrationCreditForSession(
+          wsId,
+          invalidated.contract.phase4SessionId,
+          "phase5_audit_failure",
+        );
+      } catch {
+        // The invalidation is already durable; support can grant the credit later.
+      }
+      return invalidated;
+    }
     // ---- human marking + ranking + decisions ---------------------------
     case "marks.upsert":
       await marking.upsertMark({

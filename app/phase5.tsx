@@ -124,8 +124,8 @@ const SAFEGUARDS: Array<{
   },
   {
     id: "device-local-test-only",
-    title: "This phase is test-data-only",
-    body: "Browser storage is not a shared, backed-up or role-controlled candidate database.",
+    title: "This phase is still pilot-only",
+    body: "Results are centrally saved, but live use waits for individual accounts and role controls.",
   },
   {
     id: "people-decide",

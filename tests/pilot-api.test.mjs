@@ -94,25 +94,32 @@ if (!url) {
     assert.equal(phase4.body.data, null);
 
     // current applications (identity separate) + marking + ranking
-    const current = (await call("current.freeze", {
-      name: "Round 1",
-      cases: [
-        { rowId: "c1", answers: [{ heading: "Impact", value: "We avoid 10,000 tCO2e." }], identity: { team: "Acme" } },
-        { rowId: "c2", answers: [{ heading: "Impact", value: "Vague." }], identity: { team: "Beta" } },
+    const currentTable = {
+      sheetName: "Current",
+      columns: columns.slice(0, 4),
+      rows: [
+        { id: "c1", team: "Acme", problem: "We avoid 10,000 tCO2e.", solution: "Delivery evidence." },
+        { id: "c2", team: "Beta", problem: "Vague claim.", solution: "Limited evidence." },
       ],
+      rowNumbers: [2, 3],
+    };
+    const current = (await call("current.import", {
+      fileName: "current.csv", fileSize: 1024, table: currentTable,
+      mapping: { applicationId: "id", teamName: "team", track: "", responseColumns: ["problem", "solution"] },
     })).body.data;
     assert.ok(current.datasetId);
     const aiCases = (await call("current.aiCases", { datasetId: current.datasetId })).body.data;
     assert.ok(!JSON.stringify(aiCases).includes("Acme"), "identity never reaches the AI-visible cases");
+    const markedRowId = aiCases[0].rowId;
 
     for (const reviewer of [eric, trang]) {
-      await call("marks.upsert", { applicationRowId: "c1", reviewerId: reviewer.id, guideVersionId: guide.guideVersionId, ruleId: "impact", score: 5 });
-      await call("marks.upsert", { applicationRowId: "c1", reviewerId: reviewer.id, guideVersionId: guide.guideVersionId, ruleId: "delivery", score: 3 });
-      const submit = await call("marks.submit", { applicationRowId: "c1", reviewerId: reviewer.id });
+      await call("marks.upsert", { applicationRowId: markedRowId, reviewerId: reviewer.id, guideVersionId: guide.guideVersionId, ruleId: "impact", score: 5 });
+      await call("marks.upsert", { applicationRowId: markedRowId, reviewerId: reviewer.id, guideVersionId: guide.guideVersionId, ruleId: "delivery", score: 3 });
+      const submit = await call("marks.submit", { applicationRowId: markedRowId, reviewerId: reviewer.id });
       assert.equal(Number(submit.body.data.weightedScore), 84);
     }
     const ranking = (await call("ranking.load", {})).body.data;
-    const c1 = ranking.find((r) => r.rowId === "c1");
+    const c1 = ranking.find((r) => r.rowId === markedRowId);
     assert.equal(Number(c1.totalScore), 168);
     assert.equal(c1.coverageComplete, true);
 
@@ -123,7 +130,11 @@ if (!url) {
 
   test("records, loads, and clears final decisions with roster attribution", async () => {
     const before = (await call("reviewers.list", {})).body.data.length;
-    const [{ n: activeBefore }] = await sql`SELECT count(*)::int AS n FROM netzero.reviewers WHERE active`;
+    const [workspace] = await sql`
+      SELECT id FROM netzero.workspaces WHERE name = ${process.env.MINDER_COMPETITION_NAME}`;
+    const [{ n: activeBefore }] = await sql`
+      SELECT count(*)::int AS n FROM netzero.reviewers
+       WHERE active AND workspace_id = ${workspace.id}`;
 
     // A typed decider name seeds the roster and attributes the decision to a real
     // reviewer (the same roster the Phase F dropdown will read).
@@ -137,7 +148,9 @@ if (!url) {
     // A decision-only decider is seeded INACTIVE, so it cannot enlarge the
     // final_ranking coverage roster (which is built from active reviewers only).
     assert.equal(reviewerOne.active, false, "a decision-only decider is not an active marker");
-    const [{ n: activeAfter }] = await sql`SELECT count(*)::int AS n FROM netzero.reviewers WHERE active`;
+    const [{ n: activeAfter }] = await sql`
+      SELECT count(*)::int AS n FROM netzero.reviewers
+       WHERE active AND workspace_id = ${workspace.id}`;
     assert.equal(activeAfter, activeBefore, "recording a decision does not grow the active marking roster");
 
     // Re-recording with the same name reuses the reviewer, not a duplicate.

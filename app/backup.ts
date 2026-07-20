@@ -1,10 +1,9 @@
 /**
  * Browser-state backup and restore during the staged Postgres port.
  *
- * Historical data, Phase 4 sessions and final decisions are now server-owned.
- * This file still protects the not-yet-migrated journey/guide state, current
- * applications and Phase 5 browser records until their Postgres flip removes
- * this temporary backup path.
+ * Historical data, current applications, Phase 4, Phase 5 and final decisions
+ * are now server-owned. This temporary file backup protects browser-only setup
+ * and journey state; restoring it never replaces those central records.
  *
  * Restore replaces browser state wholesale, with one deliberate exception:
  * one-use reveal receipts (phase4-consumed) are union-merged and never
