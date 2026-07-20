@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   EMPTY_HISTORICAL_IMPORT,
-  createSealedHistoricalDataset,
   deleteHistoricalDataset,
   historicalMatchKey,
   normalizeHistoricalValue,
@@ -107,15 +106,6 @@ function isSensitiveColumn(column: SourceColumn) {
   return /email|phone|mobile|contact|address|passport|identity|date of birth|bank|account number/i.test(
     column.label,
   );
-}
-
-function secureToken(prefix: string) {
-  if (!globalThis.crypto?.getRandomValues) {
-    throw new Error("This browser cannot create a secure fixed test set.");
-  }
-  const bytes = new Uint32Array(4);
-  globalThis.crypto.getRandomValues(bytes);
-  return `${prefix}-${Array.from(bytes, (value) => value.toString(16).padStart(8, "0")).join("")}`;
 }
 
 async function parseWorkbook(file: File): Promise<ParsedWorkbook> {
@@ -426,22 +416,17 @@ export function HistoricalImportBuilder({
     setSaving(true);
     setError("");
     try {
-      if (navigator.storage?.persist) await navigator.storage.persist();
-      const dataset = await createSealedHistoricalDataset({
-        datasetId: secureToken("history"),
-        fileName: workbook.fileName,
-        fileSize: workbook.fileSize,
+      const saved = await saveHistoricalDataset({
         table,
-        guideVersion,
         mapping,
         outcomeMapping,
-        prepared,
+        fileName: workbook.fileName,
+        fileSize: workbook.fileSize,
+        guideVersion,
+        replaceDatasetId:
+          replacing || summary.status === "missing" ? summary.datasetId : null,
       });
-      await saveHistoricalDataset(
-        dataset,
-        replacing || summary.status === "missing" ? summary.datasetId : null,
-      );
-      onSummaryChange(dataset.metadata.summary);
+      onSummaryChange(saved.summary);
       setReplacing(false);
       setWorkbook(null);
       setStage("file");
@@ -468,7 +453,7 @@ export function HistoricalImportBuilder({
 
   async function removeDataset() {
     if (!summary.datasetId) return;
-    if (!window.confirm("Remove all imported historical application data from this browser?")) return;
+    if (!window.confirm("Remove all imported historical application data from this workspace?")) return;
     setRemoving(true);
     setError("");
     try {
@@ -476,7 +461,7 @@ export function HistoricalImportBuilder({
       onSummaryChange({ ...EMPTY_HISTORICAL_IMPORT });
       setReplacing(false);
     } catch {
-      setError("The historical data could not be removed. Close other Minder tabs and try again.");
+      setError("The historical data could not be removed. Check your connection and try again.");
     } finally {
       setRemoving(false);
     }

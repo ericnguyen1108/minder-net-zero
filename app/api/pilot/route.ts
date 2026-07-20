@@ -164,26 +164,32 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       return importRepo.loadCurrentCasesForAi(String(p.datasetId));
 
     // ---- calibration ----------------------------------------------------
-    case "calibration.session":
-      return cal.getOrCreateSession(wsId, String(p.datasetId), Number(p.guideVersion ?? 1));
+    case "calibration.load":
+      return cal.loadSessionDocument(wsId, String(p.datasetId), Number(p.guideVersion ?? 1));
     case "calibration.save":
-      return cal.saveSession({ id: String(p.id), expectedRevision: Number(p.expectedRevision), ...(p as object) } as never);
+      if (!isObject(p.session)) throw new Error("A Phase 4 session is required.");
+      return cal.saveSessionDocument({
+        workspaceId: wsId,
+        session: p.session as never,
+        resetWithCredit: Boolean(p.resetWithCredit),
+      });
     case "calibration.reveal":
-      return cal.revealOutcomes({
+      return cal.revealSession({
         workspaceId: wsId,
         datasetId: String(p.datasetId),
-        datasetFingerprint: String(p.datasetFingerprint),
-        sessionId: String(p.sessionId),
+        guideVersion: Number(p.guideVersion ?? 1),
+        expectedRevision: Number(p.expectedRevision),
       });
-    case "calibration.credit":
-      await cal.grantRecalibrationCredit({
-        datasetFingerprint: String(p.datasetFingerprint),
-        sessionId: String(p.sessionId),
-        reason: String(p.reason ?? "phase5_audit_failure"),
-      });
-      return { ok: true };
-    case "calibration.headroom":
-      return { headroom: await cal.revealHeadroom(String(p.datasetFingerprint)) };
+    case "calibration.credit": {
+      const granted = await cal.grantRecalibrationCreditForSession(
+        wsId,
+        String(p.sessionId),
+        String(p.reason ?? "phase5_audit_failure"),
+      );
+      return { granted };
+    }
+    case "calibration.consumed":
+      return cal.consumedState(wsId, String(p.datasetFingerprint));
 
     // ---- AI assessment (reference only) --------------------------------
     case "assessment.createRun":

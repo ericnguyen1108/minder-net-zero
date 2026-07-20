@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import test from "node:test";
+import { createSessionToken, SESSION_COOKIE_NAME } from "../app/auth.ts";
 
 const root = new URL("../", import.meta.url);
 
@@ -21,10 +22,23 @@ async function freePort() {
 /** Boots the production build (`next start`) and fetches the rendered page. */
 async function renderProductionHomepage() {
   const port = await freePort();
+  const sessionSecret = "rendered-homepage-test-secret";
+  const sessionToken = await createSessionToken(sessionSecret, Date.now() + 60_000);
   const child = spawn(
     process.execPath,
     ["node_modules/next/dist/bin/next", "start", "--port", String(port)],
-    { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "production" } },
+    {
+      cwd: root,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        NODE_ENV: "production",
+        AUTH_MODE: "legacy",
+        ALLOW_LEGACY_PRODUCTION: "true",
+        ORGANISER_ACCESS_CODE: "rendered-homepage-test-code",
+        SESSION_SECRET: sessionSecret,
+      },
+    },
   );
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
@@ -36,7 +50,10 @@ async function renderProductionHomepage() {
     while (Date.now() < deadline) {
       try {
         const response = await fetch(`http://127.0.0.1:${port}/`, {
-          headers: { accept: "text/html" },
+          headers: {
+            accept: "text/html",
+            cookie: `${SESSION_COOKIE_NAME}=${sessionToken}`,
+          },
         });
         return { response, html: await response.text() };
       } catch (error) {
@@ -132,8 +149,10 @@ test("implements Phase 5 assessment and Phase 6 human decisions with export", as
   assert.match(phase4, /Human relevance check/);
   assert.match(phase4, /validateAiAssessmentBatch/);
   assert.match(storage, /predictions_committed/);
-  assert.match(storage, /PHASE4_CONSUMED_STORE, SEALED_STORE/);
-  assert.match(storage, /one-use reveal/);
+  assert.match(storage, /"calibration\.reveal"/);
+  assert.match(storage, /"calibration\.consumed"/);
+  assert.match(storage, /one-use receipt/);
+  assert.doesNotMatch(storage, /PHASE4_CONSUMED_STORE|SEALED_STORE/);
   assert.doesNotMatch(storage, /loadCompleteSealedOutcomeKey/);
   assert.match(phase5, /Passing a practice test does not make AI infallible/);
   assert.match(phase5, /117 AI requests/);

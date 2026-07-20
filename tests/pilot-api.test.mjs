@@ -87,14 +87,11 @@ if (!url) {
     const blind = (await call("historical.blind", { datasetId: imported.datasetId })).body.data;
     assert.ok(blind.length > 0 && blind.every((r) => !("outcome" in r)), "blind cases hide the outcome");
 
-    // one-use reveal -> second reveal conflicts (409)
-    const session = (await call("calibration.session", { datasetId: imported.datasetId, guideVersion: 1 })).body.data;
-    const reveal1 = await call("calibration.reveal", { datasetId: imported.datasetId, datasetFingerprint: imported.fingerprint, sessionId: session.id });
-    assert.equal(reveal1.status, 200);
-    assert.ok(reveal1.body.data.outcomes.length > 0);
-    const reveal2 = await call("calibration.reveal", { datasetId: imported.datasetId, datasetFingerprint: imported.fingerprint, sessionId: session.id });
-    assert.equal(reveal2.status, 409);
-    assert.equal(reveal2.body.error.code, "already_revealed");
+    // The richer Phase 4 document is absent until the client saves its pristine
+    // state. Its complete reveal flow is covered by pilot-historical-phase4.
+    const phase4 = await call("calibration.load", { datasetId: imported.datasetId, guideVersion: 1 });
+    assert.equal(phase4.status, 200);
+    assert.equal(phase4.body.data, null);
 
     // current applications (identity separate) + marking + ranking
     const current = (await call("current.freeze", {

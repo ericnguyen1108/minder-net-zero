@@ -1,53 +1,8 @@
-import {
-  PHASE4_CONSUMED_STORE,
-  PHASE4_STORE,
-  SEALED_STORE,
-  loadHistoricalDatasetBinding,
-  openDatabase,
-  transactionComplete,
-} from "./historical-data.ts";
-import type {
-  CanonicalOutcome,
-  HistoricalDatasetBinding,
-  StoredHistoricalRow,
-} from "./historical-data.ts";
+import { loadHistoricalDatasetBinding } from "./historical-data.ts";
+import type { CanonicalOutcome, HistoricalDatasetBinding } from "./historical-data.ts";
+import { pilot } from "./pilot-client.ts";
 import { practiceMetricsMatchLockedInputs } from "./phase4-logic.ts";
 import type { PracticeMetrics } from "./phase4-logic.ts";
-
-type Phase4ConsumedFingerprint = {
-  datasetFingerprint: string;
-  sessionId: string;
-  revealedAt: string;
-  /**
-   * Durable reveal budget. `revealsAllowed` starts at 1 (the one blind reveal)
-   * and grows by 1 for each failed-audit recalibration credit; `revealCount` is
-   * how many reveals have happened. A reveal is permitted only while
-   * revealCount < revealsAllowed. These live on the receipt (not on session
-   * state) precisely so a workspace backup/restore cannot roll them back and
-   * re-open the seal. Legacy receipts without these fields count as one reveal
-   * already spent (revealsAllowed 1, revealCount 1).
-   */
-  revealsAllowed?: number;
-  revealCount?: number;
-  history?: Array<{ sessionId: string; revealedAt: string; note: string }>;
-};
-
-const DEFAULT_REVEALS_ALLOWED = 1;
-
-function receiptRevealsAllowed(receipt: Phase4ConsumedFingerprint | undefined): number {
-  return receipt?.revealsAllowed ?? DEFAULT_REVEALS_ALLOWED;
-}
-
-function receiptRevealCount(receipt: Phase4ConsumedFingerprint | undefined): number {
-  if (!receipt) return 0;
-  return receipt.revealCount ?? DEFAULT_REVEALS_ALLOWED;
-}
-
-/** Remaining sanctioned reveals (recalibration retries) on a receipt. */
-export function receiptRevealHeadroom(receipt: Phase4ConsumedFingerprint | undefined): number {
-  if (!receipt) return 0;
-  return Math.max(0, receiptRevealsAllowed(receipt) - receiptRevealCount(receipt));
-}
 
 export const PHASE4_PROMPT_VERSION = "phase4-calibration-v1";
 export const PHASE4_SCHEMA_VERSION = "phase4-output-v1";
@@ -297,13 +252,6 @@ export function sanitizePhase4Summary(value: unknown): Phase4Summary {
   };
 }
 
-function requestResult<T>(request: IDBRequest<T>) {
-  return new Promise<T>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Private browser storage failed."));
-  });
-}
-
 export function phase4SessionId(datasetId: string, guideVersion: number) {
   return `phase4:${datasetId}:guide-${guideVersion}`;
 }
@@ -328,7 +276,10 @@ export async function contentHash(value: unknown) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function sessionMatchesBinding(session: Phase4Session, binding: HistoricalDatasetBinding) {
+export function phase4SessionMatchesBinding(
+  session: Phase4Session,
+  binding: HistoricalDatasetBinding,
+) {
   return (
     session.datasetId === binding.datasetId &&
     session.datasetFingerprint === binding.datasetFingerprint &&
@@ -339,7 +290,7 @@ function sessionMatchesBinding(session: Phase4Session, binding: HistoricalDatase
   );
 }
 
-function sessionIsCoherent(session: Phase4Session) {
+export function phase4SessionIsCoherent(session: Phase4Session) {
   if (
     !Array.isArray(session.patterns) ||
     !Array.isArray(session.patternLimitations) ||
@@ -620,7 +571,7 @@ function patternCore(pattern: Phase4Pattern) {
   );
 }
 
-function sessionTransitionAllowed(current: Phase4Session, next: Phase4Session) {
+export function phase4SessionTransitionAllowed(current: Phase4Session, next: Phase4Session) {
   const immutableKeys: Array<keyof Phase4Session> = [
     "id",
     "schemaVersion",
@@ -745,7 +696,7 @@ function metricsHashPayload(session: Phase4Session) {
   };
 }
 
-function initialSessionIsPristine(session: Phase4Session) {
+export function initialPhase4SessionIsPristine(session: Phase4Session) {
   return (
     session.revision === 0 &&
     session.modelId === null &&
@@ -772,7 +723,7 @@ function initialSessionIsPristine(session: Phase4Session) {
   );
 }
 
-async function derivedHashesAreValid(session: Phase4Session) {
+export async function phase4DerivedHashesAreValid(session: Phase4Session) {
   if (
     session.predictionHash !== null &&
     (await contentHash(session.assessments)) !== session.predictionHash
@@ -791,120 +742,49 @@ async function derivedHashesAreValid(session: Phase4Session) {
 export async function loadPhase4Session(datasetId: string, guideVersion: number) {
   const binding = await loadHistoricalDatasetBinding(datasetId);
   if (binding.guideVersion !== guideVersion) return null;
-  const database = await openDatabase();
-  try {
-    const session = await requestResult(
-      database
-        .transaction(PHASE4_STORE, "readonly")
-        .objectStore(PHASE4_STORE)
-        .get(phase4SessionId(datasetId, guideVersion)) as IDBRequest<Phase4Session | undefined>,
-    );
-    if (!session) return null;
-    if (
-      !sessionMatchesBinding(session, binding) ||
-      !sessionIsCoherent(session) ||
-      !(await derivedHashesAreValid(session))
-    ) {
-      throw new Error("Phase 4 is locked because its historical data no longer matches.");
-    }
-    return session;
-  } finally {
-    database.close();
+  const session = await pilot<Phase4Session | null>("calibration.load", {
+    datasetId,
+    guideVersion,
+  });
+  if (!session) return null;
+  if (
+    !phase4SessionMatchesBinding(session, binding) ||
+    !phase4SessionIsCoherent(session) ||
+    !(await phase4DerivedHashesAreValid(session))
+  ) {
+    throw new Error("Phase 4 is locked because its historical data no longer matches.");
   }
+  return session;
 }
 
 export async function savePhase4Session(session: Phase4Session) {
   const binding = await loadHistoricalDatasetBinding(session.datasetId);
   if (
-    !sessionMatchesBinding(session, binding) ||
-    !sessionIsCoherent(session) ||
-    !(await derivedHashesAreValid(session))
+    !phase4SessionMatchesBinding(session, binding) ||
+    !phase4SessionIsCoherent(session) ||
+    !(await phase4DerivedHashesAreValid(session))
   ) {
     throw new Error("Phase 4 cannot save against changed historical data.");
   }
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [PHASE4_STORE, PHASE4_CONSUMED_STORE],
-      "readwrite",
-    );
-    const store = transaction.objectStore(PHASE4_STORE);
-    const consumedStore = transaction.objectStore(PHASE4_CONSUMED_STORE);
-    const request = store.get(session.id) as IDBRequest<Phase4Session | undefined>;
-    const consumedRequest = consumedStore.get(
-      session.datasetFingerprint,
-    ) as IDBRequest<Phase4ConsumedFingerprint | undefined>;
-    return await new Promise<Phase4Session>((resolve, reject) => {
-      let settled = false;
-      let currentLoaded = false;
-      let consumedLoaded = false;
-      const fail = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-      const saveWhenLoaded = () => {
-        if (!currentLoaded || !consumedLoaded || settled) return;
-        const current = request.result;
-        const consumed = consumedRequest.result;
-        if (
-          consumed &&
-          (!current || consumed.sessionId !== current.id)
-        ) {
-          transaction.abort();
-          fail(new Error("This historical set has already been used for a revealed blind test."));
-          return;
-        }
-        if (
-          !consumed &&
-          (session.practiceStatus === "revealed" ||
-            session.practiceStatus === "passed" ||
-            session.practiceStatus === "failed")
-        ) {
-          transaction.abort();
-          fail(new Error("Historical outcomes can only be revealed through the one-use seal."));
-          return;
-        }
-        if (
-          (current && !sessionTransitionAllowed(current, session)) ||
-          (!current && !initialSessionIsPristine(session))
-        ) {
-          transaction.abort();
-          fail(new Error("Phase 4 changed in another tab or attempted an unsafe reversal."));
-          return;
-        }
-        const saved: Phase4Session = {
-          ...session,
-          revision: current ? current.revision + 1 : 0,
-          updatedAt: new Date().toISOString(),
-        };
-        store.put(saved);
-        transaction.oncomplete = () => {
-          if (settled) return;
-          settled = true;
-          resolve(saved);
-        };
-      };
-      request.onsuccess = () => {
-        currentLoaded = true;
-        saveWhenLoaded();
-      };
-      consumedRequest.onsuccess = () => {
-        consumedLoaded = true;
-        saveWhenLoaded();
-      };
-      request.onerror = () =>
-        fail(request.error ?? new Error("Private browser storage failed."));
-      consumedRequest.onerror = () =>
-        fail(consumedRequest.error ?? new Error("Private browser storage failed."));
-      transaction.onabort = () =>
-        fail(transaction.error ?? new Error("The Phase 4 save was cancelled."));
-      transaction.onerror = () =>
-        fail(transaction.error ?? new Error("Private browser storage failed."));
-    });
-  } finally {
-    database.close();
+  const current = await pilot<Phase4Session | null>("calibration.load", {
+    datasetId: session.datasetId,
+    guideVersion: session.guideVersion,
+  });
+  if (
+    (current && !phase4SessionTransitionAllowed(current, session)) ||
+    (!current && !initialPhase4SessionIsPristine(session))
+  ) {
+    throw new Error("Phase 4 changed in another tab or attempted an unsafe reversal.");
   }
+  const saved = await pilot<Phase4Session>("calibration.save", { session });
+  if (
+    !phase4SessionMatchesBinding(saved, binding) ||
+    !phase4SessionIsCoherent(saved) ||
+    !(await phase4DerivedHashesAreValid(saved))
+  ) {
+    throw new Error("The server returned an invalid Phase 4 session.");
+  }
+  return saved;
 }
 
 export async function createPhase4Session(args: {
@@ -913,30 +793,21 @@ export async function createPhase4Session(args: {
 }): Promise<Phase4Session> {
   const now = new Date().toISOString();
   const { binding } = args;
-  const database = await openDatabase();
-  try {
-    const consumed = await requestResult(
-      database
-        .transaction(PHASE4_CONSUMED_STORE, "readonly")
-        .objectStore(PHASE4_CONSUMED_STORE)
-        .get(binding.datasetFingerprint) as IDBRequest<
-        Phase4ConsumedFingerprint | undefined
-      >,
-    );
-    if (consumed) {
-      throw new Error("This historical set has already been used for a revealed blind test.");
-    }
-  } finally {
-    database.close();
+  const consumed = await pilot<{ consumed: boolean; headroom: number }>(
+    "calibration.consumed",
+    { datasetFingerprint: binding.datasetFingerprint },
+  );
+  if (consumed.consumed) {
+    throw new Error("This historical set has already been used for a revealed blind test.");
   }
-  return pristinePhase4Session(binding, args.guideContentHash, now, false);
+  return buildPristinePhase4Session(binding, args.guideContentHash, now, false);
 }
 
 /**
  * Builds a fresh, pristine session for a dataset. `blindnessCompromised` marks
  * a recalibration retry whose historical outcomes were revealed once before.
  */
-function pristinePhase4Session(
+export function buildPristinePhase4Session(
   binding: HistoricalDatasetBinding,
   guideContentHash: string,
   now: string,
@@ -991,129 +862,68 @@ function pristinePhase4Session(
 export async function grantPhase4RecalibrationCredit(
   phase4SessionId: string,
 ): Promise<boolean> {
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [PHASE4_STORE, PHASE4_CONSUMED_STORE],
-      "readwrite",
-    );
-    const session = await requestResult(
-      transaction.objectStore(PHASE4_STORE).get(phase4SessionId) as IDBRequest<
-        Phase4Session | undefined
-      >,
-    );
-    if (!session) return false;
-    const consumedStore = transaction.objectStore(PHASE4_CONSUMED_STORE);
-    const consumed = await requestResult(
-      consumedStore.get(session.datasetFingerprint) as IDBRequest<
-        Phase4ConsumedFingerprint | undefined
-      >,
-    );
-    if (!consumed || consumed.sessionId !== phase4SessionId) return false;
-    consumedStore.put({
-      ...consumed,
-      revealsAllowed: receiptRevealsAllowed(consumed) + 1,
-      revealCount: receiptRevealCount(consumed),
-    } satisfies Phase4ConsumedFingerprint);
-    await transactionComplete(transaction);
-    return true;
-  } finally {
-    database.close();
-  }
+  const result = await pilot<{ granted: boolean }>("calibration.credit", {
+    sessionId: phase4SessionId,
+    reason: "phase5_audit_failure",
+  });
+  return result.granted;
 }
 
 /** How many recalibration retries are currently available for a dataset. */
 export async function loadPhase4RecalibrationCredits(
   datasetFingerprint: string,
 ): Promise<number> {
-  const database = await openDatabase();
-  try {
-    const consumed = await requestResult(
-      database
-        .transaction(PHASE4_CONSUMED_STORE, "readonly")
-        .objectStore(PHASE4_CONSUMED_STORE)
-        .get(datasetFingerprint) as IDBRequest<Phase4ConsumedFingerprint | undefined>,
-    );
-    return receiptRevealHeadroom(consumed);
-  } finally {
-    database.close();
-  }
+  const state = await pilot<{ consumed: boolean; headroom: number }>(
+    "calibration.consumed",
+    { datasetFingerprint },
+  );
+  return state.headroom;
 }
 
 /**
  * Resets a consumed session to a fresh pristine one using one recalibration
  * credit, in a single transaction. Because Phase 4 session ids are
- * deterministic per (dataset, guide version), this overwrites the old revealed
- * session that shares the id — the sanctioned exception to the reversal guard.
- * The receipt is re-pointed and the credit spent; the earlier reveal is
- * preserved in the receipt history.
+ * deterministic per (dataset, guide version), this replaces the old revealed
+ * document in the same server row — the sanctioned exception to the reversal
+ * guard. The durable receipt and its unspent reveal credit remain untouched;
+ * the retry spends that credit only when its outcomes are revealed.
  */
 export async function resetPhase4SessionWithCredit(args: {
   binding: HistoricalDatasetBinding;
   guideContentHash: string;
 }): Promise<Phase4Session> {
   const { binding } = args;
-  const fresh = pristinePhase4Session(
+  const current = await loadPhase4Session(binding.datasetId, binding.guideVersion);
+  const state = await pilot<{ consumed: boolean; headroom: number }>(
+    "calibration.consumed",
+    { datasetFingerprint: binding.datasetFingerprint },
+  );
+  if (
+    !current ||
+    state.headroom < 1 ||
+    !["revealed", "passed", "failed"].includes(current.practiceStatus)
+  ) {
+    throw new Error("No recalibration retry is available for this historical set.");
+  }
+  const fresh = buildPristinePhase4Session(
     binding,
     args.guideContentHash,
     new Date().toISOString(),
     true,
   );
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [PHASE4_STORE, PHASE4_CONSUMED_STORE],
-      "readwrite",
-    );
-    const store = transaction.objectStore(PHASE4_STORE);
-    const consumedStore = transaction.objectStore(PHASE4_CONSUMED_STORE);
-    const existing = await requestResult(
-      store.get(fresh.id) as IDBRequest<Phase4Session | undefined>,
-    );
-    const consumed = await requestResult(
-      consumedStore.get(binding.datasetFingerprint) as IDBRequest<
-        Phase4ConsumedFingerprint | undefined
-      >,
-    );
-    if (
-      !consumed ||
-      receiptRevealHeadroom(consumed) < 1 ||
-      !existing ||
-      existing.id !== fresh.id ||
-      (existing.practiceStatus !== "revealed" &&
-        existing.practiceStatus !== "passed" &&
-        existing.practiceStatus !== "failed")
-    ) {
-      transaction.abort();
-      throw new Error("No recalibration retry is available for this historical set.");
-    }
-    if (!sessionIsCoherent(fresh)) {
-      transaction.abort();
-      throw new Error("The recalibration reset failed its integrity checks.");
-    }
-    store.put(fresh);
-    // Re-point the receipt at the fresh session but preserve the reveal budget
-    // and count: the retry's own reveal will spend one unit of headroom.
-    consumedStore.put({
-      datasetFingerprint: consumed.datasetFingerprint,
-      sessionId: fresh.id,
-      revealedAt: consumed.revealedAt,
-      revealsAllowed: receiptRevealsAllowed(consumed),
-      revealCount: receiptRevealCount(consumed),
-      history: [
-        ...(consumed.history ?? []),
-        {
-          sessionId: consumed.sessionId,
-          revealedAt: consumed.revealedAt,
-          note: "superseded_after_phase5_audit_failure",
-        },
-      ],
-    } satisfies Phase4ConsumedFingerprint);
-    await transactionComplete(transaction);
-    return fresh;
-  } finally {
-    database.close();
+  const reset = await pilot<Phase4Session>("calibration.save", {
+    session: { ...fresh, revision: current.revision },
+    resetWithCredit: true,
+  });
+  if (
+    !phase4SessionMatchesBinding(reset, binding) ||
+    !phase4SessionIsCoherent(reset) ||
+    !(await phase4DerivedHashesAreValid(reset)) ||
+    !reset.blindnessCompromised
+  ) {
+    throw new Error("The recalibration reset failed its integrity checks.");
   }
+  return reset;
 }
 
 export async function revealCommittedOutcomes(session: Phase4Session) {
@@ -1135,138 +945,21 @@ export async function revealCommittedOutcomes(session: Phase4Session) {
   ) {
     throw new Error("All blind predictions must be committed before outcomes can be revealed.");
   }
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [PHASE4_STORE, PHASE4_CONSUMED_STORE, SEALED_STORE],
-      "readwrite",
-    );
-    const phase4Store = transaction.objectStore(PHASE4_STORE);
-    const consumedStore = transaction.objectStore(PHASE4_CONSUMED_STORE);
-    const sessionRequest = phase4Store.get(current.id) as IDBRequest<
-      Phase4Session | undefined
-    >;
-    const consumedRequest = consumedStore.get(current.datasetFingerprint) as IDBRequest<
-      Phase4ConsumedFingerprint | undefined
-    >;
-    const sealedRequest = transaction
-      .objectStore(SEALED_STORE)
-      .index("datasetId")
-      .getAll(IDBKeyRange.only(current.datasetId)) as IDBRequest<StoredHistoricalRow[]>;
-
-    return await new Promise<Phase4Session>((resolve, reject) => {
-      let settled = false;
-      let ready = 0;
-      let result: Phase4Session | null = null;
-      const fail = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-      const revealWhenReady = () => {
-        ready += 1;
-        if (ready !== 3 || settled) return;
-        const persisted = sessionRequest.result;
-        const consumed = consumedRequest.result;
-        if (
-          consumed &&
-          persisted &&
-          consumed.sessionId === persisted.id &&
-          (persisted.practiceStatus === "revealed" ||
-            persisted.practiceStatus === "passed" ||
-            persisted.practiceStatus === "failed")
-        ) {
-          result = persisted;
-          return;
-        }
-        // Reveal is gated on the durable receipt budget, never on session
-        // state alone: a backup/restore can roll a session back to
-        // predictions_committed while the receipt (preserved on restore) still
-        // records the reveal. A second reveal is allowed only when the receipt
-        // names THIS session AND has unspent budget (a genuine credited retry).
-        const revealBudgetSpent = consumed
-          ? consumed.sessionId !== persisted?.id || receiptRevealHeadroom(consumed) < 1
-          : false;
-        if (
-          revealBudgetSpent ||
-          !persisted ||
-          persisted.revision !== current.revision ||
-          !sameValue(persisted, current) ||
-          persisted.practiceStatus !== "predictions_committed" ||
-          !persisted.predictionHash
-        ) {
-          transaction.abort();
-          fail(new Error("The blind test changed or its outcomes were already revealed."));
-          return;
-        }
-        const sealedRows = sealedRequest.result;
-        const expectedRowIds = persisted.assessments
-          .map((assessment) => assessment.rowId)
-          .sort();
-        const sealedRowIds = [...new Set(sealedRows.map((row) => row.rowId))].sort();
-        if (
-          sealedRows.length === 0 ||
-          sealedRows.length !== persisted.sealedRows ||
-          expectedRowIds.length !== sealedRowIds.length ||
-          expectedRowIds.some((rowId, index) => rowId !== sealedRowIds[index])
-        ) {
-          transaction.abort();
-          fail(new Error("Every sealed prediction must be committed before outcomes can be revealed."));
-          return;
-        }
-        const revealedAt = new Date().toISOString();
-        const revealed: Phase4Session = {
-          ...persisted,
-          practiceStatus: "revealed",
-          outcomes: sealedRows
-            .map((row) => ({ rowId: row.rowId, outcome: row.outcome }))
-            .sort((left, right) => left.rowId.localeCompare(right.rowId)),
-          revealedAt,
-          revision: persisted.revision + 1,
-          updatedAt: revealedAt,
-        };
-        if (!sessionIsCoherent(revealed)) {
-          transaction.abort();
-          fail(new Error("The revealed blind test did not pass its integrity checks."));
-          return;
-        }
-        phase4Store.put(revealed);
-        consumedStore.put({
-          datasetFingerprint: revealed.datasetFingerprint,
-          sessionId: revealed.id,
-          revealedAt,
-          revealsAllowed: receiptRevealsAllowed(consumed),
-          revealCount: receiptRevealCount(consumed) + 1,
-          ...(consumed?.history?.length ? { history: consumed.history } : {}),
-        } satisfies Phase4ConsumedFingerprint);
-        result = revealed;
-      };
-      sessionRequest.onsuccess = revealWhenReady;
-      consumedRequest.onsuccess = revealWhenReady;
-      sealedRequest.onsuccess = revealWhenReady;
-      sessionRequest.onerror = () =>
-        fail(sessionRequest.error ?? new Error("Private browser storage failed."));
-      consumedRequest.onerror = () =>
-        fail(consumedRequest.error ?? new Error("Private browser storage failed."));
-      sealedRequest.onerror = () =>
-        fail(sealedRequest.error ?? new Error("Private browser storage failed."));
-      transaction.oncomplete = () => {
-        if (settled) return;
-        if (!result) {
-          fail(new Error("The blind outcomes were not revealed."));
-          return;
-        }
-        settled = true;
-        resolve(result);
-      };
-      transaction.onabort = () =>
-        fail(transaction.error ?? new Error("The one-use reveal was cancelled."));
-      transaction.onerror = () =>
-        fail(transaction.error ?? new Error("Private browser storage failed."));
-    });
-  } finally {
-    database.close();
+  const revealed = await pilot<Phase4Session>("calibration.reveal", {
+    datasetId: current.datasetId,
+    guideVersion: current.guideVersion,
+    expectedRevision: current.revision,
+  });
+  const binding = await loadHistoricalDatasetBinding(current.datasetId);
+  if (
+    !phase4SessionMatchesBinding(revealed, binding) ||
+    !phase4SessionIsCoherent(revealed) ||
+    !(await phase4DerivedHashesAreValid(revealed)) ||
+    !revealed.outcomes
+  ) {
+    throw new Error("The revealed blind test did not pass its integrity checks.");
   }
+  return revealed;
 }
 
 export function phase4SummaryFromSession(session: Phase4Session): Phase4Summary {

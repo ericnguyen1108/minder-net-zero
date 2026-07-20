@@ -1,3 +1,5 @@
+import { pilot } from "./pilot-client.ts";
+
 export type CanonicalOutcome =
   | "progressed"
   | "not_progressed"
@@ -786,203 +788,43 @@ export function transactionComplete(transaction: IDBTransaction) {
   });
 }
 
-function deleteRowsForDataset(store: IDBObjectStore, datasetId: string) {
-  const request = store.index("datasetId").openCursor(IDBKeyRange.only(datasetId));
-  request.onsuccess = () => {
-    const cursor = request.result;
-    if (!cursor) return;
-    cursor.delete();
-    cursor.continue();
-  };
-}
-
-export async function saveHistoricalDataset(
-  dataset: SealedHistoricalDataset,
-  replaceDatasetId?: string | null,
-) {
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [DATASETS_STORE, TEACHING_STORE, SEALED_STORE, ACTIVE_STORE, PHASE4_STORE],
-      "readwrite",
-    );
-    const datasets = transaction.objectStore(DATASETS_STORE);
-    const teaching = transaction.objectStore(TEACHING_STORE);
-    const sealed = transaction.objectStore(SEALED_STORE);
-    const phase4 = transaction.objectStore(PHASE4_STORE);
-    if (replaceDatasetId && replaceDatasetId !== dataset.metadata.id) {
-      datasets.delete(replaceDatasetId);
-      deleteRowsForDataset(teaching, replaceDatasetId);
-      deleteRowsForDataset(sealed, replaceDatasetId);
-      deleteRowsForDataset(phase4, replaceDatasetId);
-    }
-    datasets.put(dataset.metadata);
-    dataset.teachingRows.forEach((row) => teaching.put(row));
-    dataset.sealedRows.forEach((row) => sealed.put(row));
-    transaction.objectStore(ACTIVE_STORE).put({
-      key: "active",
-      datasetId: dataset.metadata.id,
-      summary: dataset.metadata.summary,
-    });
-    await transactionComplete(transaction);
-  } finally {
-    database.close();
-  }
-}
-
-type StoredDatasetRead = {
-  metadata: HistoricalDatasetMetadata | undefined;
-  teachingRows: StoredHistoricalRow[];
-  sealedRows: StoredHistoricalRow[];
+export type HistoricalDatasetSave = {
+  table: SourceTable;
+  mapping: HistoricalColumnMapping;
+  outcomeMapping: Record<string, OutcomeChoice>;
+  fileName: string;
+  fileSize: number;
+  guideVersion: number;
+  replaceDatasetId?: string | null;
 };
 
-function readStoredDataset(database: IDBDatabase, datasetId: string) {
-  return new Promise<StoredDatasetRead>((resolve, reject) => {
-    const transaction = database.transaction(
-      [DATASETS_STORE, TEACHING_STORE, SEALED_STORE],
-      "readonly",
-    );
-    const metadataRequest = transaction
-      .objectStore(DATASETS_STORE)
-      .get(datasetId) as IDBRequest<HistoricalDatasetMetadata | undefined>;
-    const teachingRequest = transaction
-      .objectStore(TEACHING_STORE)
-      .index("datasetId")
-      .getAll(IDBKeyRange.only(datasetId)) as IDBRequest<StoredHistoricalRow[]>;
-    const sealedRequest = transaction
-      .objectStore(SEALED_STORE)
-      .index("datasetId")
-      .getAll(IDBKeyRange.only(datasetId)) as IDBRequest<StoredHistoricalRow[]>;
-    transaction.oncomplete = () =>
-      resolve({
-        metadata: metadataRequest.result,
-        teachingRows: teachingRequest.result,
-        sealedRows: sealedRequest.result,
-      });
-    transaction.onabort = () =>
-      reject(transaction.error ?? new Error("Private browser storage failed."));
-    transaction.onerror = () =>
-      reject(transaction.error ?? new Error("Private browser storage failed."));
-  });
-}
-
-async function verifyStoredDataset(datasetId: string, stored: StoredDatasetRead) {
-  const { metadata, teachingRows, sealedRows } = stored;
-  if (
-    !metadata ||
-    metadata.id !== datasetId ||
-    metadata.status !== "ready_for_teaching" ||
-    metadata.split.status !== "sealed" ||
-    metadata.split.algorithm !== "linked-outcome-sha256-v2" ||
-    teachingRows.length !== metadata.summary.teachingRows ||
-    sealedRows.length !== metadata.summary.sealedRows
-  ) {
-    return false;
-  }
-  if (
-    teachingRows.some((row) => row.datasetId !== datasetId || row.partition !== "teaching") ||
-    sealedRows.some((row) => row.datasetId !== datasetId || row.partition !== "sealed_test")
-  ) {
-    return false;
-  }
-  const allRows = [...teachingRows, ...sealedRows];
-  if (
-    allRows.length !== metadata.summary.validRows ||
-    metadata.summary.totalRows !== metadata.summary.validRows + metadata.summary.excludedRows ||
-    new Set(allRows.map((row) => row.rowId)).size !== allRows.length
-  ) {
-    return false;
-  }
-  if (
-    allRows.some(
-      (row) =>
-        row.applicationText !==
-        row.answers.map((answer) => `${answer.heading}\n${answer.value}`).join("\n\n"),
-    )
-  ) {
-    return false;
-  }
-  const recomputedRowIds = await Promise.all(
-    allRows.map((row) => sha256(stableJson(rowIdentity(row)))),
-  );
-  if (recomputedRowIds.some((rowId, index) => rowId !== allRows[index].rowId)) return false;
-  const datasetFingerprint = await sha256([...recomputedRowIds].sort().join("\n"));
-  const mappingHash = await sha256(
-    stableJson({ mapping: metadata.mapping, outcomeMapping: metadata.outcomeMapping }),
-  );
-  if (datasetFingerprint !== metadata.datasetFingerprint || mappingHash !== metadata.mappingHash) {
-    return false;
-  }
-  const integrityHash = await sha256(
-    stableJson({
-      algorithm: metadata.split.algorithm,
-      datasetFingerprint,
-      mappingHash,
-      assignments: allRows
-        .map((row) => ({ rowId: row.rowId, partition: row.partition }))
-        .sort((a, b) => a.rowId.localeCompare(b.rowId)),
-    }),
-  );
-  if (integrityHash !== metadata.split.integrityHash) return false;
-  const outcomeCounts = emptyOutcomeCounts();
-  allRows.forEach((row) => {
-    outcomeCounts[row.outcome] += 1;
-  });
-  return (Object.keys(outcomeCounts) as CanonicalOutcome[]).every(
-    (outcome) => outcomeCounts[outcome] === metadata.summary.outcomeCounts[outcome],
+/** The server re-prepares, fingerprints, partitions and seals the raw import. */
+export async function saveHistoricalDataset(input: HistoricalDatasetSave) {
+  return pilot<{ datasetId: string; fingerprint: string; summary: HistoricalImportSummary }>(
+    "historical.import",
+    {
+      table: input.table,
+      mapping: input.mapping,
+      outcomeMapping: input.outcomeMapping,
+      fileName: input.fileName,
+      fileSize: input.fileSize,
+      guideVersion: input.guideVersion,
+      replaceDatasetId: input.replaceDatasetId ?? null,
+    },
   );
 }
 
 export async function historicalDatasetExists(datasetId: string) {
-  const database = await openDatabase();
-  try {
-    return await verifyStoredDataset(datasetId, await readStoredDataset(database, datasetId));
-  } finally {
-    database.close();
-  }
+  const result = await pilot<{ exists: boolean }>("historical.exists", { datasetId });
+  return result.exists;
 }
 
 export async function loadActiveHistoricalSummary() {
-  const database = await openDatabase();
-  try {
-    const pointer = await new Promise<
-      { key: "active"; datasetId: string; summary: HistoricalImportSummary } | undefined
-    >((resolve, reject) => {
-      const request = database.transaction(ACTIVE_STORE, "readonly").objectStore(ACTIVE_STORE).get("active");
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error("Private browser storage failed."));
-    });
-    if (!pointer?.datasetId) return null;
-    const stored = await readStoredDataset(database, pointer.datasetId);
-    if (!(await verifyStoredDataset(pointer.datasetId, stored))) {
-      throw new Error("The saved historical set did not pass its integrity check.");
-    }
-    return stored.metadata?.summary ?? null;
-  } finally {
-    database.close();
-  }
+  return pilot<HistoricalImportSummary | null>("historical.active");
 }
 
 export async function deleteHistoricalDataset(datasetId: string) {
-  const database = await openDatabase();
-  try {
-    const transaction = database.transaction(
-      [DATASETS_STORE, TEACHING_STORE, SEALED_STORE, ACTIVE_STORE, PHASE4_STORE],
-      "readwrite",
-    );
-    transaction.objectStore(DATASETS_STORE).delete(datasetId);
-    deleteRowsForDataset(transaction.objectStore(TEACHING_STORE), datasetId);
-    deleteRowsForDataset(transaction.objectStore(SEALED_STORE), datasetId);
-    deleteRowsForDataset(transaction.objectStore(PHASE4_STORE), datasetId);
-    const active = transaction.objectStore(ACTIVE_STORE);
-    const activeRequest = active.get("active");
-    activeRequest.onsuccess = () => {
-      if (activeRequest.result?.datasetId === datasetId) active.delete("active");
-    };
-    await transactionComplete(transaction);
-  } finally {
-    database.close();
-  }
+  await pilot("historical.delete", { datasetId });
 }
 
 export type HistoricalTeachingExample = Pick<
@@ -992,20 +834,9 @@ export type HistoricalTeachingExample = Pick<
 
 // Phase 4 can use this accessor. It cannot return sealed rows, identities, old scores or reviewer notes.
 export async function loadTeachingRows(datasetId: string) {
-  const database = await openDatabase();
-  try {
-    const stored = await readStoredDataset(database, datasetId);
-    if (!(await verifyStoredDataset(datasetId, stored))) {
-      throw new Error("The saved historical set did not pass its integrity check.");
-    }
-    return stored.teachingRows.map((row) => ({
-      rowId: row.rowId,
-      answers: row.answers,
-      outcome: row.outcome,
-    }));
-  } finally {
-    database.close();
-  }
+  const rows = await pilot<HistoricalTeachingExample[]>("historical.teaching", { datasetId });
+  if (!Array.isArray(rows)) throw new Error("The server returned invalid historical teaching data.");
+  return rows;
 }
 
 export type HistoricalDatasetBinding = {
@@ -1020,23 +851,9 @@ export type HistoricalDatasetBinding = {
 export async function loadHistoricalDatasetBinding(
   datasetId: string,
 ): Promise<HistoricalDatasetBinding> {
-  const database = await openDatabase();
-  try {
-    const stored = await readStoredDataset(database, datasetId);
-    if (!(await verifyStoredDataset(datasetId, stored)) || !stored.metadata) {
-      throw new Error("The saved historical set did not pass its integrity check.");
-    }
-    return {
-      datasetId,
-      datasetFingerprint: stored.metadata.datasetFingerprint,
-      integrityHash: stored.metadata.split.integrityHash,
-      guideVersion: stored.metadata.guideVersion,
-      teachingRows: stored.metadata.summary.teachingRows,
-      sealedRows: stored.metadata.summary.sealedRows,
-    };
-  } finally {
-    database.close();
-  }
+  const binding = await pilot<HistoricalDatasetBinding | null>("historical.binding", { datasetId });
+  if (!binding) throw new Error("The saved historical set did not pass its integrity check.");
+  return binding;
 }
 
 export type BlindPracticeCase = Pick<StoredHistoricalRow, "rowId" | "answers">;
@@ -1044,17 +861,7 @@ export type BlindPracticeCase = Pick<StoredHistoricalRow, "rowId" | "answers">;
 // This is the only pre-reveal sealed accessor. Historical outcomes, identities,
 // notes and scores are deliberately absent from its return type and payload.
 export async function loadBlindPracticeRows(datasetId: string): Promise<BlindPracticeCase[]> {
-  const database = await openDatabase();
-  try {
-    const stored = await readStoredDataset(database, datasetId);
-    if (!(await verifyStoredDataset(datasetId, stored))) {
-      throw new Error("The saved historical set did not pass its integrity check.");
-    }
-    return stored.sealedRows.map((row) => ({
-      rowId: row.rowId,
-      answers: row.answers,
-    }));
-  } finally {
-    database.close();
-  }
+  const rows = await pilot<BlindPracticeCase[]>("historical.blind", { datasetId });
+  if (!Array.isArray(rows)) throw new Error("The server returned invalid blind practice data.");
+  return rows;
 }

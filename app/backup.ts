@@ -1,13 +1,12 @@
 /**
- * Whole-workspace backup and restore.
+ * Browser-state backup and restore during the staged Postgres port.
  *
- * Everything the organiser builds lives in this browser profile (localStorage
- * journey/guide state + IndexedDB datasets, sessions, receipts, runs and
- * results). Browser storage is evictable, so a competition that calibrates now
- * and assesses weeks later is one cache eviction away from losing everything.
- * A backup file is the recovery path.
+ * Historical data, Phase 4 sessions and final decisions are now server-owned.
+ * This file still protects the not-yet-migrated journey/guide state, current
+ * applications and Phase 5 browser records until their Postgres flip removes
+ * this temporary backup path.
  *
- * Restore replaces the workspace wholesale, with one deliberate exception:
+ * Restore replaces browser state wholesale, with one deliberate exception:
  * one-use reveal receipts (phase4-consumed) are union-merged and never
  * removed. Restoring an older backup must not let a sealed practice test be
  * taken twice.

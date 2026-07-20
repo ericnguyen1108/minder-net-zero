@@ -10,9 +10,7 @@ import {
 } from "./backup.ts";
 
 /**
- * Sidebar backup panel. Browser storage is evictable, so downloading a backup
- * file is the organiser's only protection against losing the approved guide,
- * calibration and results between sessions.
+ * Temporary backup panel for the domains that have not moved to Postgres yet.
  */
 export default function BackupControls() {
   const fileInput = useRef<HTMLInputElement>(null);
@@ -53,7 +51,7 @@ export default function BackupControls() {
       const backup = parseWorkspaceBackup(await file.text());
       const confirmed = window.confirm(
         `Replace everything in this browser with the backup (${describeBackup(backup)})?\n\n` +
-          "Close any other Minder Net Zero tabs first. Existing one-use practice-test receipts are kept either way.",
+          "Close any other Minder Net Zero tabs first. Server-held historical data and calibration are not replaced.",
       );
       if (!confirmed) return;
       await importWorkspace(backup);
@@ -70,9 +68,9 @@ export default function BackupControls() {
   }
 
   return (
-    <div className="sidebar-backup" aria-label="Workspace backup">
+    <div className="sidebar-backup" aria-label="Browser backup">
       <strong>Data safety</strong>
-      <p>Work is saved in this browser only. Download a backup after important steps.</p>
+      <p>Current applications and Phase 5 work still live in this browser. Historical data and calibration are saved centrally.</p>
       <div className="sidebar-backup-actions">
         <button type="button" onClick={downloadBackup} disabled={busy}>
           Download backup
