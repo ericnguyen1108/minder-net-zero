@@ -3,6 +3,7 @@
 import { OrganizationSwitcher, UserButton, useOrganization, useUser } from "@clerk/nextjs";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 type RequestState = "idle" | "saving" | "error" | "success";
 
@@ -134,7 +135,7 @@ function LegacyAccountControls() {
         Account &amp; password
       </button>
 
-      {open ? (
+      {open ? createPortal((
         <div className="account-modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget) close();
         }}>
@@ -228,7 +229,7 @@ function LegacyAccountControls() {
             </div>
           </section>
         </div>
-      ) : null}
+      ), document.body) : null}
     </div>
   );
 }

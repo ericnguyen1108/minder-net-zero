@@ -118,6 +118,18 @@ test("removes starter assets and keeps the safety language", async () => {
   await access(root);
 });
 
+test("renders the account dialog above the sticky application layout", async () => {
+  const [accountControls, styles] = await Promise.all([
+    readFile(new URL("../app/account-controls.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(accountControls, /import \{ createPortal \} from "react-dom"/);
+  assert.match(accountControls, /createPortal\([\s\S]*account-modal-backdrop[\s\S]*document\.body\)/);
+  assert.match(styles, /\.sidebar\s*\{[\s\S]*position:\s*sticky/);
+  assert.match(styles, /\.account-modal-backdrop\s*\{[\s\S]*z-index:\s*1000/);
+});
+
 test("implements Phase 5 assessment, Phase F human marking, and final decisions", async () => {
   const [page, phase4, storage, phase5, phase5Storage, currentImport, currentData, phase5Api, decisions, marking, markingUi] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
