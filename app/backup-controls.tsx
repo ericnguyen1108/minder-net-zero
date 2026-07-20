@@ -10,7 +10,7 @@ import {
 } from "./backup.ts";
 
 /**
- * Temporary backup panel for the domains that have not moved to Postgres yet.
+ * Temporary backup panel for the setup/guide draft that is still browser-owned.
  */
 export default function BackupControls() {
   const fileInput = useRef<HTMLInputElement>(null);
@@ -33,7 +33,7 @@ export default function BackupControls() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      setNotice({ tone: "ok", text: "Backup downloaded. Keep it somewhere safe." });
+      setNotice({ tone: "ok", text: "Setup backup downloaded. Keep it somewhere safe." });
     } catch (error) {
       setNotice({
         tone: "error",
@@ -50,7 +50,7 @@ export default function BackupControls() {
     try {
       const backup = parseWorkspaceBackup(await file.text());
       const confirmed = window.confirm(
-        `Replace everything in this browser with the backup (${describeBackup(backup)})?\n\n` +
+        `Replace the setup progress in this browser with the backup (${describeBackup(backup)})?\n\n` +
           "Close any other Minder Net Zero tabs first. Centrally saved competition data is not replaced.",
       );
       if (!confirmed) return;
@@ -68,12 +68,12 @@ export default function BackupControls() {
   }
 
   return (
-    <div className="sidebar-backup" aria-label="Browser backup">
-      <strong>Data safety</strong>
-      <p>Competition data is saved centrally. This temporary backup covers only browser setup and journey progress.</p>
+    <div className="sidebar-backup" aria-label="Setup progress backup">
+      <strong>Setup backup</strong>
+      <p>Competition data is saved centrally. This file covers only the setup form and Decision Guide progress on this browser.</p>
       <div className="sidebar-backup-actions">
         <button type="button" onClick={downloadBackup} disabled={busy}>
-          Download backup
+          Download setup
         </button>
         <button type="button" onClick={() => fileInput.current?.click()} disabled={busy}>
           Restore…

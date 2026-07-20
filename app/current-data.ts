@@ -4,11 +4,6 @@ export { isSensitiveAssessmentHeading } from "./assessment-safety.ts";
 import type { SourceTable } from "./historical-data.ts";
 import { pilot } from "./pilot-client.ts";
 
-export const CURRENT_DATASETS_STORE = "current-datasets";
-export const CURRENT_CASES_STORE = "current-cases";
-export const CURRENT_IDENTITIES_STORE = "current-identities";
-export const CURRENT_ACTIVE_STORE = "current-active";
-
 export const MAX_CURRENT_ANSWER_COLUMNS = 40;
 export const MAX_CURRENT_ANSWER_CHARS = 30_000;
 export const MAX_CURRENT_APPLICATION_CHARS = 70_000;

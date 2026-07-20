@@ -38,6 +38,7 @@ import type {
   Phase5SafeguardApproval,
 } from "./phase5-storage";
 import { createPhase4InputFingerprint } from "./phase4-logic";
+import { deleteLegacyCandidateDatabase } from "./browser-storage-cleanup";
 import ProductionDashboard from "./production-dashboard";
 
 const LEGACY_STORAGE_KEY = "minder-net-zero-phase-1";
@@ -658,7 +659,14 @@ function formatApprovalDate(value: string | null) {
 }
 
 export default function Home() {
-  return process.env.NEXT_PUBLIC_AUTH_MODE === "clerk" ? <ProductionDashboard /> : <LegacyHome />;
+  return process.env.NEXT_PUBLIC_AUTH_MODE === "clerk" ? <ProductionHome /> : <LegacyHome />;
+}
+
+function ProductionHome() {
+  useEffect(() => {
+    void deleteLegacyCandidateDatabase().catch(() => undefined);
+  }, []);
+  return <ProductionDashboard />;
 }
 
 function LegacyHome() {
@@ -771,6 +779,13 @@ function LegacyHome() {
           setCurrentImport((current) => ({ ...current, status: "missing" }));
         }
         setCurrentStorageState("verified");
+        // Every candidate-data domain is now server-owned. Purge the obsolete
+        // local database only after both central read paths completed safely.
+        try {
+          await deleteLegacyCandidateDatabase();
+        } catch {
+          // A failed/blocked cleanup never downgrades the verified server state.
+        }
       } catch {
         setHistoricalImport((current) =>
           current.status === "ready" ? { ...current, status: "missing" } : current,

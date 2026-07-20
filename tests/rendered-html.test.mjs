@@ -101,10 +101,12 @@ test("removes starter assets and keeps the safety language", async () => {
   assert.doesNotMatch(page, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
   assert.match(historyImport, /No AI in this step/);
   assert.match(historyImport, /not uploaded or sent to AI/);
-  assert.match(historyData, /historical-teaching/);
-  assert.match(historyData, /historical-sealed/);
-  assert.match(historyData, /historical-active/);
+  assert.match(historyData, /"historical\.import"/);
+  assert.match(historyData, /"historical\.teaching"/);
+  assert.match(historyData, /"historical\.blind"/);
+  assert.match(historyData, /"historical\.active"/);
   assert.match(historyData, /did not pass its integrity check/);
+  assert.doesNotMatch(historyData, /indexedDB|IDBDatabase|openDatabase/);
   assert.doesNotMatch(`${historyImport}\n${historyData}\n${historyParser}`, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
   assert.match(layout, /fair, evidence-backed application review/i);
   assert.doesNotMatch(packageJson, /react-loading-skeleton|site-creator-vinext-starter|vinext|wrangler|cloudflare/);
@@ -180,7 +182,7 @@ test("implements Phase 5 assessment and Phase 6 human decisions with export", as
   assert.match(phase5Storage, /phase5AssessmentSetIsValid/);
   assert.match(currentData, /no candidate will be silently excluded/i);
   assert.match(currentImport, /test or deliberately de-identified data/i);
-  assert.match(currentData, /CURRENT_IDENTITIES_STORE/);
+  assert.doesNotMatch(currentData, /indexedDB|IDBDatabase|CURRENT_IDENTITIES_STORE/);
   assert.match(currentData, /loadCurrentCasesForAi/);
   assert.match(phase5Api, /store:false|phase4Post/);
   assert.doesNotMatch(`${currentImport}\n${currentData}`, /OPENAI_API_KEY|api\.openai\.com/);
