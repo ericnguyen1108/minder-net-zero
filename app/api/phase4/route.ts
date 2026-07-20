@@ -4,6 +4,7 @@ import {
   PHASE4_BASE_INSTRUCTIONS,
   buildPhase4AssessmentModelInput,
   getPhase4AssessmentProtocolHash,
+  resolvePhase4AssessmentEvidence,
 } from "../../phase4-protocol.ts";
 import { isSensitiveAssessmentHeading } from "../../assessment-safety.ts";
 import { localAuthBypassAllowed, requestIsAuthorized } from "../../auth.ts";
@@ -109,16 +110,19 @@ class PublicApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly publicMessage: string;
+  readonly validationReason?: string;
 
   constructor(
     status: number,
     code: string,
     publicMessage: string,
+    validationReason?: string,
   ) {
     super(code);
     this.status = status;
     this.code = code;
     this.publicMessage = publicMessage;
+    this.validationReason = validationReason;
   }
 }
 
@@ -359,7 +363,10 @@ export async function POST(request: Request) {
     const result =
       parsed.action === "discover_patterns"
         ? normalizePatternResult(rawResult, parsed)
-        : normalizeAssessmentResult(rawResult, parsed);
+        : normalizeAssessmentResult(
+            resolvePhase4AssessmentEvidence(rawResult, parsed.cases),
+            parsed,
+          );
 
     const responseBody: Record<string, unknown> = {
       action: parsed.action,
@@ -373,8 +380,23 @@ export async function POST(request: Request) {
     return json(responseBody, 200);
   } catch (error) {
     if (error instanceof PublicApiError) {
+      const publicError: Record<string, string> = {
+        code: error.code,
+        message: error.publicMessage,
+      };
+      if (error.code === "invalid_ai_response" && error.validationReason) {
+        // A reason code is safe to retain because it describes only the failed
+        // structural invariant. Never log the model output, evidence quote, or
+        // applicant data here.
+        console.warn("phase4_ai_response_rejected", {
+          validationReason: error.validationReason,
+        });
+        if (localAuthBypassAllowed(request.headers.get("host"))) {
+          publicError.validationReason = error.validationReason;
+        }
+      }
       return json(
-        { error: { code: error.code, message: error.publicMessage } },
+        { error: publicError },
         error.status,
       );
     }
@@ -976,9 +998,9 @@ function patternKindMatchesRule(
 }
 
 function normalizeAssessmentResult(value: unknown, request: AssessRequest) {
-  const source = requireUpstreamRecord(value);
+  const source = requireUpstreamRecord(value, "assessment_result_not_object");
   if (!Array.isArray(source.assessments) || source.assessments.length !== request.cases.length) {
-    throw invalidUpstream();
+    throw invalidUpstream("assessment_case_coverage_mismatch");
   }
   const casesById = new Map(request.cases.map((item) => [item.rowId, item]));
   const caseIds = new Set(casesById.keys());
@@ -990,11 +1012,13 @@ function normalizeAssessmentResult(value: unknown, request: AssessRequest) {
   };
 
   const assessments = source.assessments.map((value) => {
-    const assessment = requireUpstreamRecord(value);
-    const rowId = upstreamString(assessment.rowId, 300);
-    if (!caseIds.has(rowId) || seenRows.has(rowId)) throw invalidUpstream();
+    const assessment = requireUpstreamRecord(value, "assessment_case_not_object");
+    const rowId = upstreamString(assessment.rowId, 300, false, "assessment_row_id_invalid");
+    if (!caseIds.has(rowId) || seenRows.has(rowId)) {
+      throw invalidUpstream("assessment_row_id_unknown_or_duplicate");
+    }
     const currentCase = casesById.get(rowId);
-    if (!currentCase) throw invalidUpstream();
+    if (!currentCase) throw invalidUpstream("assessment_row_id_unknown");
     seenRows.add(rowId);
 
     const eligibilityChecks = normalizeChecks(
@@ -1002,19 +1026,27 @@ function normalizeAssessmentResult(value: unknown, request: AssessRequest) {
       byKind.eligibility,
       ["pass", "fail", "unclear"],
       currentCase.answers,
+      "eligibility",
     );
     const eliminationChecks = normalizeChecks(
       assessment.eliminationChecks,
       byKind.elimination,
       ["triggered", "not_triggered", "unclear"],
       currentCase.answers,
+      "elimination",
     );
     const criterionScores = normalizeScores(
       assessment.criterionScores,
       byKind.criterion,
       currentCase.answers,
     );
-    const uncertainties = upstreamStringArray(assessment.uncertainties, 50, 1_000, true);
+    const uncertainties = upstreamStringArray(
+      assessment.uncertainties,
+      50,
+      1_000,
+      true,
+      "assessment_uncertainties_invalid",
+    );
     return {
       rowId,
       eligibilityChecks,
@@ -1023,7 +1055,9 @@ function normalizeAssessmentResult(value: unknown, request: AssessRequest) {
       uncertainties,
     };
   });
-  if (seenRows.size !== caseIds.size) throw invalidUpstream();
+  if (seenRows.size !== caseIds.size) {
+    throw invalidUpstream("assessment_case_coverage_mismatch");
+  }
   return { assessments };
 }
 
@@ -1032,65 +1066,94 @@ function normalizeChecks(
   expectedIds: string[],
   allowedResults: string[],
   answers: SafeAnswer[],
+  scope: "eligibility" | "elimination",
 ) {
-  if (!Array.isArray(value) || value.length !== expectedIds.length) throw invalidUpstream();
+  if (!Array.isArray(value) || value.length !== expectedIds.length) {
+    throw invalidUpstream(`${scope}_rule_coverage_mismatch`);
+  }
   const expected = new Set(expectedIds);
   const seen = new Set<string>();
   return value.map((item) => {
-    const source = requireUpstreamRecord(item);
-    const ruleId = upstreamString(source.ruleId, 300);
-    if (!expected.has(ruleId) || seen.has(ruleId) || !allowedResults.includes(String(source.result))) {
-      throw invalidUpstream();
+    const source = requireUpstreamRecord(item, `${scope}_check_not_object`);
+    const ruleId = upstreamString(source.ruleId, 300, false, `${scope}_rule_id_invalid`);
+    if (!expected.has(ruleId) || seen.has(ruleId)) {
+      throw invalidUpstream(`${scope}_rule_id_unknown_or_duplicate`);
+    }
+    if (!allowedResults.includes(String(source.result))) {
+      throw invalidUpstream(`${scope}_result_invalid`);
     }
     seen.add(ruleId);
     return {
       ruleId,
       result: source.result as string,
-      evidence: source.evidence === null ? null : normalizeEvidence(source.evidence, answers),
-      explanation: upstreamString(source.explanation, 2_000, true),
+      evidence:
+        source.evidence === null
+          ? null
+          : normalizeEvidence(source.evidence, answers, scope),
+      explanation: upstreamString(
+        source.explanation,
+        2_000,
+        true,
+        `${scope}_explanation_invalid`,
+      ),
     };
   });
 }
 
 function normalizeScores(value: unknown, expectedIds: string[], answers: SafeAnswer[]) {
-  if (!Array.isArray(value) || value.length !== expectedIds.length) throw invalidUpstream();
+  if (!Array.isArray(value) || value.length !== expectedIds.length) {
+    throw invalidUpstream("criterion_rule_coverage_mismatch");
+  }
   const expected = new Set(expectedIds);
   const seen = new Set<string>();
   return value.map((item) => {
-    const source = requireUpstreamRecord(item);
-    const ruleId = upstreamString(source.ruleId, 300);
+    const source = requireUpstreamRecord(item, "criterion_score_not_object");
+    const ruleId = upstreamString(source.ruleId, 300, false, "criterion_rule_id_invalid");
     const score = source.score === null ? null : Number(source.score);
     const evidence =
-      source.evidence === null ? null : normalizeEvidence(source.evidence, answers);
-    if (
-      !expected.has(ruleId) ||
-      seen.has(ruleId) ||
-      (score !== null && (!Number.isInteger(score) || score < 1 || score > 5)) ||
-      (score === null) !== (evidence === null)
-    ) {
-      throw invalidUpstream();
+      source.evidence === null ? null : normalizeEvidence(source.evidence, answers, "criterion");
+    if (!expected.has(ruleId) || seen.has(ruleId)) {
+      throw invalidUpstream("criterion_rule_id_unknown_or_duplicate");
+    }
+    if (score !== null && (!Number.isInteger(score) || score < 1 || score > 5)) {
+      throw invalidUpstream("criterion_score_invalid");
+    }
+    if ((score === null) !== (evidence === null)) {
+      throw invalidUpstream("criterion_score_evidence_pair_mismatch");
     }
     seen.add(ruleId);
     return {
       ruleId,
       score,
       evidence,
-      explanation: upstreamString(source.explanation, 2_000, true),
+      explanation: upstreamString(
+        source.explanation,
+        2_000,
+        true,
+        "criterion_explanation_invalid",
+      ),
     };
   });
 }
 
-function normalizeEvidence(value: unknown, answers: SafeAnswer[]) {
-  const evidence = requireUpstreamRecord(value);
+function normalizeEvidence(
+  value: unknown,
+  answers: SafeAnswer[],
+  scope: "eligibility" | "elimination" | "criterion",
+) {
+  const evidence = requireUpstreamRecord(value, `${scope}_evidence_not_object`);
   const answerIndex = Number(evidence.answerIndex);
-  const quote = upstreamString(evidence.quote, 4_000);
-  if (
-    !Number.isInteger(answerIndex) ||
-    answerIndex < 0 ||
-    answerIndex >= answers.length ||
-    !answers[answerIndex].value.includes(quote)
-  ) {
-    throw invalidUpstream();
+  if (!Number.isInteger(answerIndex) || answerIndex < 0 || answerIndex >= answers.length) {
+    throw invalidUpstream(`${scope}_evidence_answer_index_invalid`);
+  }
+  const quote = upstreamString(
+    evidence.quote,
+    4_000,
+    false,
+    `${scope}_evidence_quote_invalid`,
+  );
+  if (!answers[answerIndex].value.includes(quote)) {
+    throw invalidUpstream(`${scope}_evidence_quote_not_verbatim`);
   }
   return { answerIndex, quote };
 }
@@ -1137,22 +1200,31 @@ function invalid(message: string) {
   return new PublicApiError(400, "invalid_request", message);
 }
 
-function invalidUpstream() {
+function invalidUpstream(validationReason = "invalid_structure") {
   return new PublicApiError(
     502,
     "invalid_ai_response",
     "The AI service returned a result that failed safety validation. Nothing was saved.",
+    validationReason,
   );
 }
 
-function requireUpstreamRecord(value: unknown): Record<string, unknown> {
-  if (!isRecord(value)) throw invalidUpstream();
+function requireUpstreamRecord(
+  value: unknown,
+  validationReason = "invalid_object",
+): Record<string, unknown> {
+  if (!isRecord(value)) throw invalidUpstream(validationReason);
   return value;
 }
 
-function upstreamString(value: unknown, maxLength: number, allowEmpty = false) {
+function upstreamString(
+  value: unknown,
+  maxLength: number,
+  allowEmpty = false,
+  validationReason = "invalid_string",
+) {
   const result = boundedString(value, maxLength, allowEmpty);
-  if (result === null) throw invalidUpstream();
+  if (result === null) throw invalidUpstream(validationReason);
   return result;
 }
 
@@ -1161,9 +1233,14 @@ function upstreamStringArray(
   maxItems: number,
   maxLength: number,
   allowEmpty = false,
+  validationReason = "invalid_string_array",
 ) {
-  if (!Array.isArray(value) || value.length > maxItems) throw invalidUpstream();
-  return value.map((item) => upstreamString(item, maxLength, allowEmpty));
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw invalidUpstream(validationReason);
+  }
+  return value.map((item) =>
+    upstreamString(item, maxLength, allowEmpty, validationReason),
+  );
 }
 
 function readStringField(value: Record<string, unknown>, key: string) {

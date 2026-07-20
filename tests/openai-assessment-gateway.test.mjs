@@ -55,7 +55,7 @@ function cases() {
   ];
 }
 
-function validOutput(quote = "reduces emissions by 42 percent") {
+function validOutput(spanId = "c0-a0-s0") {
   return {
     assessments: [
       {
@@ -66,7 +66,7 @@ function validOutput(quote = "reduces emissions by 42 percent") {
           {
             ruleId: "impact",
             score: 5,
-            evidence: { answerIndex: 0, quote },
+            evidence: { spanId },
             explanation: "The submitted answer provides a quantified pilot result.",
           },
         ],
@@ -166,10 +166,25 @@ test("sends only blind allow-listed input with store false and the strict Phase 
   assert.deepEqual(body.text.format, PHASE4_ASSESS_CASES_FORMAT);
   assert.equal(body.text.format.strict, true);
   assert.equal(body.text.format.schema.additionalProperties, false);
+  const criterionVariants =
+    body.text.format.schema.properties.assessments.items.properties.criterionScores.items.anyOf;
+  assert.equal(criterionVariants.length, 2);
+  assert.equal(criterionVariants[0].properties.score.type, "integer");
+  assert.equal(criterionVariants[0].properties.evidence.type, "object");
+  assert.equal(criterionVariants[1].properties.score.type, "null");
+  assert.equal(criterionVariants[1].properties.evidence.type, "null");
   assert.doesNotMatch(body.input, /DO-NOT-SEND|reviewerNotes|teamName/);
   const safeInput = JSON.parse(body.input.split("Safe input:\n")[1]);
   assert.deepEqual(Object.keys(safeInput.cases[0]).sort(), ["answers", "rowId"]);
-  assert.deepEqual(Object.keys(safeInput.cases[0].answers[0]).sort(), ["heading", "value"]);
+  assert.deepEqual(Object.keys(safeInput.cases[0].answers[0]).sort(), [
+    "evidenceSpans",
+    "heading",
+  ]);
+  assert.equal(safeInput.cases[0].answers[0].evidenceSpans[0].spanId, "c0-a0-s0");
+  assert.equal(
+    safeInput.cases[0].answers[0].evidenceSpans[0].text,
+    "Our verified pilot reduces emissions by 42 percent for each installation.",
+  );
 
   assert.deepEqual(Object.keys(result).sort(), [
     "assessmentProtocolHash",
@@ -194,7 +209,10 @@ test("sends only blind allow-listed input with store false and the strict Phase 
   });
   assert.equal(result.results[0].weightedScore, 100);
   assert.equal(result.results[0].classification.recommendation, "progressed");
-  assert.equal(result.results[0].assessment.criterionScores[0].evidence.quote, "reduces emissions by 42 percent");
+  assert.equal(
+    result.results[0].assessment.criterionScores[0].evidence.quote,
+    "Our verified pilot reduces emissions by 42 percent for each installation.",
+  );
   assert.doesNotMatch(JSON.stringify(result), /DO-NOT-RETURN|DO-NOT-SEND/);
 });
 
@@ -301,7 +319,7 @@ test("rejects schema-valid-looking output when exact current evidence validation
         content: [
           {
             type: "output_text",
-            text: JSON.stringify(validOutput("invented evidence not present in the answer")),
+            text: JSON.stringify(validOutput("c0-a0-s999")),
           },
         ],
       },

@@ -12,6 +12,7 @@ import {
   PHASE4_BASE_INSTRUCTIONS,
   buildPhase4AssessmentModelInput,
   getPhase4AssessmentProtocolHash,
+  resolvePhase4AssessmentEvidence,
 } from "../app/phase4-protocol.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
@@ -193,8 +194,12 @@ export function createOpenAiAssessmentGateway(
         timeoutMs,
       });
       const parsed = parseCompletedProviderResponse(providerResponse, pinnedModel);
-      const validation = validateAiAssessmentBatch(
+      const resolvedOutput = resolvePhase4AssessmentEvidence(
         parsed.output,
+        safeRequest.cases,
+      );
+      const validation = validateAiAssessmentBatch(
+        resolvedOutput,
         safeRequest.cases,
         safeRequest.guide,
       );

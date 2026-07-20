@@ -8,8 +8,8 @@ import { isSensitiveAssessmentHeading } from "../../assessment-safety.ts";
 
 export const maxDuration = 60;
 
-export const PHASE5_PROMPT_VERSION = "phase5-current-assessment-v1";
-export const PHASE5_OUTPUT_SCHEMA_VERSION = "phase5-assessment-v1";
+export const PHASE5_PROMPT_VERSION = "phase5-current-assessment-v2";
+export const PHASE5_OUTPUT_SCHEMA_VERSION = "phase5-assessment-v2";
 export const PHASE5_BATCH_ALGORITHM = "opaque-row-order-byte-pack-v1";
 
 const MAX_REQUEST_BYTES = 700_000;

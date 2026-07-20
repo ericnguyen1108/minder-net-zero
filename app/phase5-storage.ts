@@ -4,8 +4,8 @@ import { createPhase4InputFingerprint } from "./phase4-logic.ts";
 import { getPhase4AssessmentProtocolHash } from "./phase4-protocol.ts";
 import { pilot, PilotConflictError } from "./pilot-client.ts";
 
-export const PHASE5_PROMPT_VERSION = "phase5-current-assessment-v1";
-export const PHASE5_SCHEMA_VERSION = "phase5-assessment-v1";
+export const PHASE5_PROMPT_VERSION = "phase5-current-assessment-v2";
+export const PHASE5_SCHEMA_VERSION = "phase5-assessment-v2";
 export const PHASE5_BATCH_ALGORITHM = "opaque-row-order-byte-pack-v1";
 
 export const PHASE5_SAFEGUARD_IDS = [

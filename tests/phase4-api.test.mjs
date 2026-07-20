@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { GET, POST } from "../app/api/phase4/route.ts";
 import { createSessionToken } from "../app/auth.ts";
-import { getPhase4AssessmentProtocolHash } from "../app/phase4-protocol.ts";
+import {
+  buildPhase4AssessmentModelInput,
+  getPhase4AssessmentProtocolHash,
+  resolvePhase4AssessmentEvidence,
+} from "../app/phase4-protocol.ts";
 
 const guide = {
   version: 1,
@@ -35,6 +39,54 @@ function localRequest(path = "/api/phase4", init = {}) {
     headers: { host: "localhost", ...(init.headers ?? {}) },
   });
 }
+
+test("evidence span IDs are unique across a batch and cannot cross cases", () => {
+  const currentCases = [
+    {
+      rowId: "case-a",
+      answers: [{ heading: "Impact", value: "First case evidence." }],
+    },
+    {
+      rowId: "case-b",
+      answers: [{ heading: "Impact", value: "Second case evidence." }],
+    },
+  ];
+  const input = buildPhase4AssessmentModelInput({
+    action: "assess_cases",
+    guide,
+    approvedPatterns: [],
+    cases: currentCases,
+  });
+  const safeInput = JSON.parse(input.split("Safe input:\n")[1]);
+  assert.equal(safeInput.cases[0].answers[0].evidenceSpans[0].spanId, "c0-a0-s0");
+  assert.equal(safeInput.cases[1].answers[0].evidenceSpans[0].spanId, "c1-a0-s0");
+
+  const resolved = resolvePhase4AssessmentEvidence(
+    {
+      assessments: [
+        {
+          rowId: "case-b",
+          eligibilityChecks: [],
+          eliminationChecks: [],
+          criterionScores: [
+            {
+              ruleId: "impact",
+              score: 5,
+              evidence: { spanId: "c0-a0-s0" },
+              explanation: "Wrong case span.",
+            },
+          ],
+          uncertainties: [],
+        },
+      ],
+    },
+    currentCases,
+  );
+  assert.deepEqual(resolved.assessments[0].criterionScores[0].evidence, {
+    answerIndex: -1,
+    quote: "",
+  });
+});
 
 test("reports a server-managed but unconfigured AI connection without exposing a key", async () => {
   const previous = process.env.OPENAI_API_KEY;
@@ -228,10 +280,7 @@ test("rejects hallucinated assessment evidence at the server boundary", async ()
                       {
                         ruleId: "impact",
                         score: 5,
-                        evidence: {
-                          answerIndex: 0,
-                          quote: "50,000 tonnes independently verified",
-                        },
+                        evidence: { spanId: "c0-a0-s999" },
                         explanation: "The claimed impact is high.",
                       },
                     ],
@@ -265,7 +314,9 @@ test("rejects hallucinated assessment evidence at the server boundary", async ()
       }),
     );
     assert.equal(response.status, 502);
-    assert.equal((await response.json()).error.code, "invalid_ai_response");
+    const error = (await response.json()).error;
+    assert.equal(error.code, "invalid_ai_response");
+    assert.equal(error.validationReason, "criterion_evidence_answer_index_invalid");
     assert.equal(upstreamCalls, 1);
   } finally {
     globalThis.fetch = previousFetch;

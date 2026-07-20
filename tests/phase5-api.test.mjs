@@ -131,7 +131,7 @@ function successfulAssessment(model = "gpt-5.6-terra") {
                     {
                       ruleId: "impact",
                       score: 5,
-                      evidence: { answerIndex: 0, quote: "12,000 tonnes" },
+                      evidence: { spanId: "c0-a0-s0" },
                       explanation: "The application states a quantified emissions outcome.",
                     },
                   ],
@@ -195,7 +195,10 @@ test("accepts a fully matched contract and inherits the non-stored structured ga
     assert.equal(body.assessmentProtocolHash, payload.run.assessmentProtocolHash);
     assert.equal(body.model, payload.run.expectedModelId);
     assert.equal(body.findings.length, 1);
-    assert.equal(body.findings[0].criterionScores[0].evidence.quote, "12,000 tonnes");
+    assert.equal(
+      body.findings[0].criterionScores[0].evidence.quote,
+      "We expect to avoid 12,000 tonnes of emissions annually.",
+    );
     assert.doesNotMatch(JSON.stringify(body), /recommendation|weightedScore|finalDecision/i);
 
     assert.equal(captured.url, "https://api.openai.com/v1/responses");
