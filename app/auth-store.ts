@@ -31,12 +31,14 @@ type StoreConfig = {
 function storeConfig(): StoreConfig | null {
   if (typeof process === "undefined") return null;
   const url = (
+    process.env.MINDER_AUTH_KV_REST_API_URL ??
     process.env.AUTH_KV_REST_API_URL ??
     process.env.UPSTASH_REDIS_REST_URL ??
     process.env.KV_REST_API_URL ??
     ""
   ).trim();
   const token = (
+    process.env.MINDER_AUTH_KV_REST_API_TOKEN ??
     process.env.AUTH_KV_REST_API_TOKEN ??
     process.env.UPSTASH_REDIS_REST_TOKEN ??
     process.env.KV_REST_API_TOKEN ??
