@@ -279,7 +279,8 @@ test("a required stored password fails closed if its Redis record disappears", a
           body: JSON.stringify({ accessCode: "correct-horse-battery" }),
         }),
       );
-      assert.equal(bootstrapLogin.status, 401);
+      assert.equal(bootstrapLogin.status, 503);
+      assert.equal((await bootstrapLogin.json()).error.code, "auth_store_unavailable");
 
       const oldBootstrapToken = await createSessionToken(SECRET, Date.now() + 60_000);
       assert.equal(

@@ -171,7 +171,7 @@ export async function verifyAccessCodeAndGetVersion(providedCode: string): Promi
   // Once a deployment has moved to a stored password, a missing Redis record
   // must lock the workspace instead of silently reviving the bootstrap secret.
   if (storedPasswordIsRequired()) {
-    return { valid: false, credentialVersion: null };
+    throw new Error("password_store_missing_record");
   }
   if (!env.ORGANISER_ACCESS_CODE?.trim()) return { valid: false, credentialVersion: null };
   return {
