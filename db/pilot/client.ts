@@ -17,10 +17,15 @@ if (typeof window !== "undefined") {
 
 export type Sql = postgres.Sql<Record<string, never>>;
 
+export const PILOT_DATABASE_NOT_CONFIGURED = "PILOT_DATABASE_NOT_CONFIGURED";
+
 function connectionString(): string {
   const url = (process.env.PILOT_DATABASE_URL ?? process.env.DATABASE_URL ?? "").trim();
   if (!url) {
-    throw new Error("PILOT_DATABASE_URL (or DATABASE_URL) is required before using pilot storage.");
+    throw Object.assign(
+      new Error("PILOT_DATABASE_URL (or DATABASE_URL) is required before using pilot storage."),
+      { code: PILOT_DATABASE_NOT_CONFIGURED },
+    );
   }
   return url;
 }

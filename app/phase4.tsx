@@ -628,13 +628,21 @@ export function Phase4Workspace({
     if (!session || !teachingConfirmation || busy) return;
     if (session.patterns.some((pattern) => pattern.decision === "pending")) return;
     const now = new Date().toISOString();
-    await persist({
-      ...session,
-      patternStatus: "approved",
-      teachingApprovedAt: now,
-      teachingApprovedBy: organiserName,
-    });
-    setStep("test");
+    setBusy(true);
+    setError("");
+    try {
+      await persist({
+        ...session,
+        patternStatus: "approved",
+        teachingApprovedAt: now,
+        teachingApprovedBy: organiserName,
+      });
+      setStep("test");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Teaching approval was not saved.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function lockPolicy() {
@@ -670,7 +678,15 @@ export function Phase4Workspace({
       lockedAt: new Date().toISOString(),
       lockedBy: organiserName,
     };
-    await persist({ ...session, acceptancePolicy: policy, practiceStatus: "policy_locked" });
+    setBusy(true);
+    setError("");
+    try {
+      await persist({ ...session, acceptancePolicy: policy, practiceStatus: "policy_locked" });
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "The pass rules were not locked.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runPracticeTest() {
@@ -811,24 +827,32 @@ export function Phase4Workspace({
 
   async function recoverMetrics() {
     if (!session?.outcomes || session.metrics || busy) return;
-    const metrics = metricsForSession(session);
-    const evidenceReviewSampleIds = selectEvidenceReviewSampleIds(session.assessments);
-    const metricsHash = await createPhase4InputFingerprint({
-      assessments: session.assessments,
-      outcomes: session.outcomes,
-      acceptancePolicy: session.acceptancePolicy,
-      metrics,
-      evidenceReviewSampleIds,
-      assessmentProtocolHash: session.assessmentProtocolHash,
-    });
-    const next = {
-      ...session,
-      metrics,
-      metricsHash,
-      evidenceReviewSampleIds,
-      evidenceReviewRowIds: [],
-    };
-    await persist(next);
+    setBusy(true);
+    setError("");
+    try {
+      const metrics = metricsForSession(session);
+      const evidenceReviewSampleIds = selectEvidenceReviewSampleIds(session.assessments);
+      const metricsHash = await createPhase4InputFingerprint({
+        assessments: session.assessments,
+        outcomes: session.outcomes,
+        acceptancePolicy: session.acceptancePolicy,
+        metrics,
+        evidenceReviewSampleIds,
+        assessmentProtocolHash: session.assessmentProtocolHash,
+      });
+      const next = {
+        ...session,
+        metrics,
+        metricsHash,
+        evidenceReviewSampleIds,
+        evidenceReviewRowIds: [],
+      };
+      await persist(next);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "The practice metrics were not saved.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function confirmEvidenceRelevance(rowId: string) {
@@ -863,12 +887,20 @@ export function Phase4Workspace({
     if (!session?.metrics || busy) return;
     if (decision === "passed" && !practiceTargetsPass(session)) return;
     const now = new Date().toISOString();
-    await persist({
-      ...session,
-      practiceStatus: decision,
-      finalDecisionAt: now,
-      finalDecisionBy: organiserName,
-    });
+    setBusy(true);
+    setError("");
+    try {
+      await persist({
+        ...session,
+        practiceStatus: decision,
+        finalDecisionAt: now,
+        finalDecisionBy: organiserName,
+      });
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "The practice decision was not saved.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   const resolvedPatterns = session?.patterns.filter((pattern) => pattern.decision !== "pending").length ?? 0;
@@ -923,7 +955,13 @@ export function Phase4Workspace({
 
       <div className="phase4-layout">
         <main className="phase4-main">
-          {!session ? (
+          {!session && error ? (
+            <section className="phase4-card">
+              <h3>Phase 4 could not be opened</h3>
+              <p>Return to setup, check the approved guide and historical set, then try again.</p>
+              <button className="secondary-button" type="button" onClick={onBack}>Back to setup</button>
+            </section>
+          ) : !session ? (
             <section className="phase4-card"><h3>Checking your sealed workspace…</h3><p>No data is being sent while this check runs.</p></section>
           ) : step === "teach" ? (
             <>
@@ -1087,7 +1125,7 @@ export function Phase4Workspace({
               ) : null}
 
               {session.outcomes && !session.metrics ? (
-                <section className="phase4-card"><h3>Outcomes revealed; finishing comparison</h3><p>The immutable prediction set is safe. Recalculate the metrics without calling AI again.</p><button className="secondary-button" type="button" onClick={() => void recoverMetrics()}>Calculate saved results</button></section>
+                <section className="phase4-card"><h3>Outcomes revealed; finishing comparison</h3><p>The immutable prediction set is safe. Recalculate the metrics without calling AI again.</p><button className="secondary-button" type="button" disabled={busy} onClick={() => void recoverMetrics()}>Calculate saved results</button></section>
               ) : null}
 
               {session.metrics ? (

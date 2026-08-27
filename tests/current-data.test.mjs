@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createCurrentDataset,
+  currentImportPilotRequestBytes,
   currentDatasetExists,
   deleteCurrentDataset,
   loadActiveCurrentSummary,
@@ -9,9 +10,11 @@ import {
   loadCurrentDatasetBinding,
   loadCurrentIdentitiesForReview,
   prepareCurrentDataset,
+  prepareCurrentDatasetForPilot,
   sanitizeCurrentImportSummary,
   saveCurrentDataset,
 } from "../app/current-data.ts";
+import { MAX_PILOT_REQUEST_BYTES } from "../app/pilot-client.ts";
 
 const columns = [
   { key: "id", label: "Application ID", index: 0 },
@@ -71,6 +74,24 @@ test("prepares all 700 applications, preserves leading-zero IDs and keeps duplic
   assert.equal(prepared.warningCounts["repeated-team"], 2);
   assert.ok(prepared.rows[0].warnings.includes("identical-text"));
   assert.ok(prepared.rows[2].warnings.includes("repeated-team"));
+});
+
+test("blocks a text-heavy cohort during review before the pilot request can overflow", () => {
+  const rows = makeRows(700).map((row, index) => ({
+    ...row,
+    problem: `${index}: ${"P".repeat(5_700)}`,
+  }));
+  const input = {
+    fileName: "large-current.csv",
+    fileSize: 4_000_000,
+    table: makeTable(rows),
+    mapping,
+  };
+  assert.equal(prepareCurrentDataset(input.table, mapping).canSeal, true);
+  assert.ok(currentImportPilotRequestBytes(input) > MAX_PILOT_REQUEST_BYTES);
+  const prepared = prepareCurrentDatasetForPilot(input);
+  assert.equal(prepared.canSeal, false);
+  assert.match(prepared.sealBlockers.join(" "), /too large for this pilot/i);
 });
 
 test("blocks missing IDs/text and every duplicate ID without silently dropping a source row", () => {
@@ -250,7 +271,13 @@ test("current storage functions use the authenticated pilot transport", async ()
   };
   try {
     const saved = await saveCurrentDataset({
-      fileName: "current.csv", fileSize: 1000, table: makeTable(makeRows(1)), mapping,
+      fileName: "current.csv",
+      fileSize: 1000,
+      table: makeTable([{ ...makeRows(1)[0], unselectedCanary: "must-not-leave-browser" }], [
+        ...columns,
+        { key: "unselectedCanary", label: "Internal notes", index: columns.length },
+      ]),
+      mapping,
     });
     assert.deepEqual(saved.summary, summary);
     assert.equal(await currentDatasetExists(summary.datasetId), true);
@@ -263,6 +290,10 @@ test("current storage functions use the authenticated pilot transport", async ()
       "current.import", "current.exists", "current.active", "current.aiCases",
       "current.identities", "current.binding", "current.delete",
     ]);
+    assert.ok(
+      !JSON.stringify(calls[0]).includes("must-not-leave-browser"),
+      "current import sends only mapped columns",
+    );
     assert.ok(!JSON.stringify(calls[3]).includes("Team"), "AI request contains only the dataset id");
   } finally {
     globalThis.fetch = originalFetch;

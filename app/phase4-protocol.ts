@@ -7,6 +7,7 @@ export const PHASE4_ASSESSMENT_REQUEST_PROTOCOL = {
   maxCases: 6,
   maxOutputTokens: 12_000,
   maxAnswersPerRow: 40,
+  maxAnswerChars: 30_000,
   maxRowTextChars: 70_000,
   maxGuideRules: 60,
   maxApprovedPatterns: 20,

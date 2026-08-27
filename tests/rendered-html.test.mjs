@@ -100,7 +100,8 @@ test("removes starter assets and keeps the safety language", async () => {
   assert.match(page, /rules: \[\]/);
   assert.doesNotMatch(page, /fetch\(|OPENAI_API_KEY|api\.openai\.com/);
   assert.match(historyImport, /No AI in this step/);
-  assert.match(historyImport, /not uploaded or sent to AI/);
+  assert.match(historyImport, /Historical data is not sent to AI in this step/);
+  assert.match(historyImport, /Saved in the private pilot workspace/);
   assert.match(historyData, /"historical\.import"/);
   assert.match(historyData, /"historical\.teaching"/);
   assert.match(historyData, /"historical\.blind"/);
@@ -128,6 +129,8 @@ test("renders the account dialog above the sticky application layout", async () 
   assert.match(accountControls, /createPortal\([\s\S]*account-modal-backdrop[\s\S]*document\.body\)/);
   assert.match(styles, /\.sidebar\s*\{[\s\S]*position:\s*sticky/);
   assert.match(styles, /\.account-modal-backdrop\s*\{[\s\S]*z-index:\s*1000/);
+  assert.match(styles, /\.approval-checkbox\s*\{[\s\S]*display:\s*grid/);
+  assert.match(styles, /\.approval-checkbox > span\s*\{[\s\S]*display:\s*grid/);
 });
 
 test("implements Phase 5 assessment, Phase F human marking, and final decisions", async () => {
@@ -159,6 +162,7 @@ test("implements Phase 5 assessment, Phase F human marking, and final decisions"
   assert.match(page, /step\.number === 7 && safeguardsApproved/);
   assert.match(page, /step\.number === 8 && currentReady/);
   assert.match(page, /historyStorageState === "verified"/);
+  assert.match(page, /historicalImport\.guideVersion === guide\.version/);
   assert.match(phase4, /AI service not connected/);
   assert.match(phase4, /Historical agreement is not truth/);
   assert.match(phase4, /Approve for supervised pilot/);

@@ -421,7 +421,7 @@ export async function finalizeCurrentImport(
 
   await transaction.execute(sql`
     select pg_advisory_xact_lock(
-      hashtextextended(${`${input.tenantId}:${input.competitionId}:${session.sourceHash}`}, 0)
+      hashtextextended(${`${input.tenantId}:${input.competitionId}:current-cohort`}, 0)
     )
   `);
 
@@ -503,6 +503,24 @@ export async function finalizeCurrentImport(
   const source = await currentImportSourceHash(canonicalRows);
   if (source.sourceHash !== session.sourceHash) {
     throw new CurrentImportRepositoryError("source_hash_mismatch");
+  }
+
+  // One competition must never expose two different current cohorts at once.
+  // A deliberate replacement needs its own audited workflow; until then, fail
+  // closed instead of mixing old and corrected applications downstream.
+  const activeCurrentDatasets = await transaction
+    .select({ id: datasets.id, sourceHash: datasets.sourceHash })
+    .from(datasets)
+    .where(
+      and(
+        eq(datasets.tenantId, input.tenantId),
+        eq(datasets.competitionId, input.competitionId),
+        eq(datasets.kind, "current"),
+        inArray(datasets.status, ["ready", "locked"]),
+      ),
+    );
+  if (activeCurrentDatasets.some((dataset) => dataset.sourceHash !== source.sourceHash)) {
+    throw new CurrentImportRepositoryError("source_dataset_conflict");
   }
 
   const [existingDataset] = await transaction

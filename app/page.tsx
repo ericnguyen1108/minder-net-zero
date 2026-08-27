@@ -869,6 +869,7 @@ function LegacyHome() {
     guideApproved &&
     historyStorageState === "verified" &&
     historicalImport.status === "ready" &&
+    historicalImport.guideVersion === guide.version &&
     Boolean(historicalImport.datasetId);
   const phase4Matches =
     historyReady &&
@@ -1220,6 +1221,7 @@ function LegacyHome() {
             summary={historicalImport}
             guideVersion={guide.version}
             onSummaryChange={updateHistoricalImport}
+            onContinue={() => openPhase4("teach")}
             onBack={() => setActiveView("overview")}
           />
         ) : activeView === "learning" && historicalImport.datasetId ? (

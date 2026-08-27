@@ -6,7 +6,7 @@ import {
   EMPTY_CURRENT_IMPORT,
   deleteCurrentDataset,
   isSensitiveAssessmentHeading,
-  prepareCurrentDataset,
+  prepareCurrentDatasetForPilot,
   saveCurrentDataset,
 } from "./current-data";
 import type {
@@ -16,7 +16,7 @@ import type {
   CurrentWarningCode,
   PreparedCurrentDataset,
 } from "./current-data";
-import { MAX_HISTORICAL_ROWS } from "./historical-parser";
+import { MAX_CURRENT_SOURCE_ROWS } from "./historical-parser";
 import {
   columnMatches,
   firstMatchingColumn,
@@ -194,8 +194,17 @@ export function CurrentImportBuilder({
   const [error, setError] = useState("");
   const table = workbook?.sheets[sheetIndex] ?? null;
   const prepared = useMemo(
-    () => (table ? prepareCurrentDataset(table, mapping) : null),
-    [mapping, table],
+    () =>
+      table && workbook
+        ? prepareCurrentDatasetForPilot({
+            fileName: workbook.fileName,
+            fileSize: workbook.fileSize,
+            table,
+            mapping,
+            replaceDatasetId: replacing ? summary.datasetId : null,
+          })
+        : null,
+    [mapping, replacing, summary.datasetId, table, workbook],
   );
 
   useEffect(() => {
@@ -214,9 +223,9 @@ export function CurrentImportBuilder({
     try {
       const parsed = await parseWorkbookFile(file);
       const first = parsed.sheets[0];
-      if (first.rows.length > MAX_HISTORICAL_ROWS) {
+      if (first.rows.length > MAX_CURRENT_SOURCE_ROWS) {
         throw new Error(
-          `This file has more than ${MAX_HISTORICAL_ROWS.toLocaleString()} rows. Split the export before continuing.`,
+          `This file has more than ${MAX_CURRENT_SOURCE_ROWS.toLocaleString()} rows. Split the export before continuing.`,
         );
       }
       setWorkbook(parsed);
@@ -461,7 +470,7 @@ function FileStage({
       <label className="file-picker">
         <span className="file-picker-icon" aria-hidden="true">↑</span>
         <strong>{reading ? "Checking your file…" : "Choose spreadsheet"}</strong>
-        <span>.xlsx, .csv or .tsv · up to 25 MB · up to {MAX_HISTORICAL_ROWS.toLocaleString()} rows</span>
+        <span>.xlsx, .csv or .tsv · up to 25 MB · up to {MAX_CURRENT_SOURCE_ROWS.toLocaleString()} rows</span>
         <input ref={inputRef} type="file" accept=".xlsx,.csv,.tsv,text/csv,text/tab-separated-values" onChange={onFile} disabled={reading} />
       </label>
       <button className="text-button template-button" type="button" onClick={downloadTemplate}>Download a simple template <span aria-hidden="true">↓</span></button>

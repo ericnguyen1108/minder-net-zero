@@ -1,4 +1,12 @@
-import { pilot } from "./pilot-client.ts";
+import {
+  MAX_PILOT_REQUEST_BYTES,
+  pilot,
+  pilotRequestByteLength,
+} from "./pilot-client.ts";
+import { isSensitiveAssessmentHeading } from "./assessment-safety.ts";
+import { PHASE4_ASSESSMENT_REQUEST_PROTOCOL } from "./phase4-protocol.ts";
+
+export const MAX_HISTORICAL_ROWS = 1_000;
 
 export type CanonicalOutcome =
   | "progressed"
@@ -82,7 +90,9 @@ export type HistoricalIssueCode =
   | "duplicate-id"
   | "conflicting-id"
   | "duplicate-text"
-  | "conflicting-outcome";
+  | "conflicting-outcome"
+  | "answer-too-long"
+  | "application-too-long";
 
 export type HistoricalWarningCode = "short-text" | "repeated-team-year";
 
@@ -216,6 +226,52 @@ export function historicalMatchKey(value: string) {
   return normalizeHistoricalValue(value).replace(/\s+/g, " ").toLowerCase();
 }
 
+export function historicalMappingProblems(
+  table: SourceTable,
+  mapping: HistoricalColumnMapping,
+) {
+  const problems: string[] = [];
+  const columns = new Map(table.columns.map((column) => [column.key, column]));
+  if (!mapping.applicationId && !mapping.teamName) {
+    problems.push("Choose an application ID or a team/application-name column.");
+  }
+  if (!mapping.outcome) problems.push("Choose the column containing each past decision.");
+  if (mapping.responseColumns.length === 0) {
+    problems.push("Choose at least one application-answer column.");
+  }
+  if (mapping.responseColumns.length > PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxAnswersPerRow) {
+    problems.push(
+      `Choose no more than ${PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxAnswersPerRow} application-answer columns; none will be silently removed.`,
+    );
+  }
+  const allSelected = [
+    mapping.applicationId,
+    mapping.teamName,
+    mapping.outcome,
+    mapping.year,
+    mapping.track,
+    mapping.judgeScore,
+    mapping.reviewerNotes,
+    ...mapping.responseColumns,
+  ].filter(Boolean);
+  if (new Set(allSelected).size !== allSelected.length) {
+    problems.push("Each source column can be used only once.");
+  }
+  if (allSelected.some((key) => !columns.has(key))) {
+    problems.push("One or more selected columns no longer exists in this sheet.");
+  }
+  const sensitive = mapping.responseColumns
+    .map((key) => columns.get(key))
+    .filter((column) => column && isSensitiveAssessmentHeading(column.label))
+    .map((column) => column!.label);
+  if (sensitive.length > 0) {
+    problems.push(
+      `Move identity, contact, outcome, reviewer or score columns out of assessment answers: ${sensitive.join(", ")}.`,
+    );
+  }
+  return problems;
+}
+
 function addIssue(row: PreparedHistoricalRow, issue: HistoricalIssueCode) {
   if (!row.issues.includes(issue)) row.issues.push(issue);
 }
@@ -240,6 +296,12 @@ export function prepareHistoricalDataset(
   mapping: HistoricalColumnMapping,
   outcomeMapping: Record<string, OutcomeChoice>,
 ): PreparedHistoricalDataset {
+  if (table.rows.length > MAX_HISTORICAL_ROWS) {
+    throw new Error(
+      `This historical import accepts up to ${MAX_HISTORICAL_ROWS.toLocaleString()} rows in one file.`,
+    );
+  }
+  const mappingBlockers = historicalMappingProblems(table, mapping);
   const labelByKey = new Map(table.columns.map((column) => [column.key, column.label]));
   const rows: PreparedHistoricalRow[] = table.rows.map((source, index) => {
     const answers = mapping.responseColumns
@@ -272,6 +334,20 @@ export function prepareHistoricalDataset(
 
     if (!row.teamName && !row.externalId) addIssue(row, "missing-team");
     if (!row.applicationText) addIssue(row, "missing-text");
+    if (
+      row.answers.some(
+        (answer) => answer.value.length > PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxAnswerChars,
+      )
+    ) {
+      addIssue(row, "answer-too-long");
+    }
+    const assessmentCharacters = row.answers.reduce(
+      (total, answer) => total + answer.heading.length + answer.value.length,
+      0,
+    );
+    if (assessmentCharacters > PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxRowTextChars) {
+      addIssue(row, "application-too-long");
+    }
     if (!row.sourceOutcome) addIssue(row, "missing-outcome");
     else if (!row.outcome) addIssue(row, "unmapped-outcome");
     else if (row.outcome === "ignore") addIssue(row, "ignored-outcome");
@@ -351,7 +427,17 @@ export function prepareHistoricalDataset(
   const duplicateRows = rows.filter((row) =>
     row.issues.some((issue) => duplicateCodes.includes(issue)),
   ).length;
-  const sealBlockers: string[] = [];
+  const sealBlockers: string[] = [...mappingBlockers];
+  if (issueCounts["answer-too-long"]) {
+    sealBlockers.push(
+      `${issueCounts["answer-too-long"].toLocaleString()} application ${issueCounts["answer-too-long"] === 1 ? "has an answer" : "have answers"} over ${PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxAnswerChars.toLocaleString()} characters.`,
+    );
+  }
+  if (issueCounts["application-too-long"]) {
+    sealBlockers.push(
+      `${issueCounts["application-too-long"].toLocaleString()} application ${issueCounts["application-too-long"] === 1 ? "has" : "have"} more than ${PHASE4_ASSESSMENT_REQUEST_PROTOCOL.maxRowTextChars.toLocaleString()} characters across the selected answers.`,
+    );
+  }
   if (validRows.length < 20) sealBlockers.push("At least 20 usable past decisions are needed.");
   if (outcomeCounts.progressed < 5) {
     sealBlockers.push("At least 5 progressed or shortlisted examples are needed.");
@@ -663,19 +749,76 @@ export type HistoricalDatasetSave = {
   replaceDatasetId?: string | null;
 };
 
+export function projectSourceTable(
+  table: SourceTable,
+  selectedColumnKeys: Iterable<string>,
+): SourceTable {
+  const selectedKeys = new Set([...selectedColumnKeys].filter(Boolean));
+  const columns = table.columns.filter((column) => selectedKeys.has(column.key));
+  return {
+    sheetName: table.sheetName,
+    columns,
+    rows: table.rows.map((row) =>
+      Object.fromEntries(columns.map((column) => [column.key, row[column.key] ?? ""])),
+    ),
+    rowNumbers: [...table.rowNumbers],
+  };
+}
+
+function historicalImportPayload(input: HistoricalDatasetSave) {
+  return {
+    table: projectSourceTable(input.table, [
+      input.mapping.applicationId,
+      input.mapping.teamName,
+      ...input.mapping.responseColumns,
+      input.mapping.outcome,
+      input.mapping.year,
+      input.mapping.track,
+      input.mapping.judgeScore,
+      input.mapping.reviewerNotes,
+    ]),
+    mapping: input.mapping,
+    outcomeMapping: input.outcomeMapping,
+    fileName: input.fileName,
+    fileSize: input.fileSize,
+    guideVersion: input.guideVersion,
+    replaceDatasetId: input.replaceDatasetId ?? null,
+  };
+}
+
+export function historicalImportPilotRequestBytes(input: HistoricalDatasetSave) {
+  return pilotRequestByteLength("historical.import", historicalImportPayload(input));
+}
+
+export function prepareHistoricalDatasetForPilot(
+  input: HistoricalDatasetSave,
+): PreparedHistoricalDataset {
+  const prepared = prepareHistoricalDataset(
+    input.table,
+    input.mapping,
+    input.outcomeMapping,
+  );
+  if (
+    !prepared.canSeal ||
+    historicalImportPilotRequestBytes(input) <= MAX_PILOT_REQUEST_BYTES
+  ) {
+    return prepared;
+  }
+  return {
+    ...prepared,
+    canSeal: false,
+    sealBlockers: [
+      ...prepared.sealBlockers,
+      "The selected historical data is too large for this pilot. Select fewer application-answer columns or shorten long answers, then check the rows again.",
+    ],
+  };
+}
+
 /** The server re-prepares, fingerprints, partitions and seals the raw import. */
 export async function saveHistoricalDataset(input: HistoricalDatasetSave) {
   return pilot<{ datasetId: string; fingerprint: string; summary: HistoricalImportSummary }>(
     "historical.import",
-    {
-      table: input.table,
-      mapping: input.mapping,
-      outcomeMapping: input.outcomeMapping,
-      fileName: input.fileName,
-      fileSize: input.fileSize,
-      guideVersion: input.guideVersion,
-      replaceDatasetId: input.replaceDatasetId ?? null,
-    },
+    historicalImportPayload(input),
   );
 }
 

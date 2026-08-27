@@ -34,16 +34,54 @@ export class PilotConflictError extends PilotError {
 
 type Envelope<T> = { ok?: boolean; data?: T; error?: { code?: string; message?: string } };
 
+// Vercel rejects function request bodies above 4.5 MB before this app can return
+// JSON. Leave headroom for platform framing and count UTF-8 bytes, not JS code
+// units, so the browser can give the organiser a useful error first.
+export const MAX_PILOT_REQUEST_BYTES = 4_000_000;
+
+export function pilotRequestByteLength(
+  action: string,
+  payload: Record<string, unknown> = {},
+): number {
+  return new TextEncoder().encode(JSON.stringify({ action, payload })).byteLength;
+}
+
+const REQUEST_TOO_LARGE_MESSAGE =
+  "This import is too large to send safely. Select fewer answer columns or shorten long answers, then try again.";
+
+function unreadableResponseError(status: number): PilotError {
+  if (status === 413) {
+    return new PilotError(REQUEST_TOO_LARGE_MESSAGE, "request_too_large");
+  }
+  if (status >= 500) {
+    return new PilotError(
+      "The server is temporarily unavailable. Keep this tab open and try again.",
+      "server_unavailable",
+    );
+  }
+  return new PilotError("The server returned an unreadable response.", "bad_response");
+}
+
 export async function pilot<T = unknown>(
   action: string,
   payload: Record<string, unknown> = {},
 ): Promise<T> {
+  let requestBody: string;
+  try {
+    requestBody = JSON.stringify({ action, payload });
+  } catch {
+    throw new PilotError("This request could not be prepared safely.", "invalid_request");
+  }
+  if (new TextEncoder().encode(requestBody).byteLength > MAX_PILOT_REQUEST_BYTES) {
+    throw new PilotError(REQUEST_TOO_LARGE_MESSAGE, "request_too_large");
+  }
+
   let response: Response;
   try {
     response = await fetch("/api/pilot", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action, payload }),
+      body: requestBody,
       cache: "no-store",
     });
   } catch {
@@ -54,7 +92,7 @@ export async function pilot<T = unknown>(
   try {
     body = (await response.json()) as Envelope<T>;
   } catch {
-    throw new PilotError("The server returned an unreadable response.", "bad_response");
+    throw unreadableResponseError(response.status);
   }
 
   if (response.ok && body.ok) return body.data as T;

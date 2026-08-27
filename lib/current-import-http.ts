@@ -120,6 +120,8 @@ export function currentImportErrorResponse(error: unknown): Response {
     const message =
       error.code === "revision_conflict"
         ? "This import changed in another session. Reload its status before continuing."
+        : error.code === "source_dataset_conflict"
+          ? "This pilot already has a different published cohort for this competition. It supports one current cohort per competition."
         : error.code === "duplicate_external_ref"
           ? "Every application reference must be unique within the source file."
           : error.code === "import_not_found"

@@ -13,6 +13,7 @@ export const MAX_PASSWORD_LENGTH = 256;
 const PASSWORD_RECORD_KEY = "minder-net-zero:auth:organiser:v1";
 const PASSWORD_RECORD_SCHEMA = 1;
 const PBKDF2_ITERATIONS = 310_000;
+const PASSWORD_STORE_TIMEOUT_MS = 5_000;
 
 export type PasswordRecord = {
   schemaVersion: 1;
@@ -123,6 +124,7 @@ async function redisCommand(command: readonly string[]): Promise<unknown> {
     },
     body: JSON.stringify(command),
     cache: "no-store",
+    signal: AbortSignal.timeout(PASSWORD_STORE_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`password_store_unavailable:${response.status}`);
   const payload = (await response.json()) as { result?: unknown; error?: unknown };

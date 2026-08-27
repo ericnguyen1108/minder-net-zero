@@ -1,7 +1,6 @@
 import {
   authIsConfigured,
   clearSessionCookie,
-  isLocalHostHeader,
   localAuthBypassAllowed,
   issueSessionCookie,
   requestIsAuthorized,

@@ -1,5 +1,9 @@
 import readXlsxFile from "read-excel-file/browser";
-import { buildSourceTable, parseDelimitedText } from "./historical-parser";
+import {
+  MAX_CURRENT_SOURCE_ROWS,
+  buildSourceTable,
+  parseDelimitedText,
+} from "./historical-parser";
 import type { SourceColumn, SourceTable } from "./historical-data";
 
 export type ParsedWorkbook = {
@@ -24,13 +28,13 @@ export async function parseWorkbookFile(file: File): Promise<ParsedWorkbook> {
       return {
         fileName: file.name,
         fileSize: file.size,
-        sheets: [buildSourceTable("Applications", matrix)],
+        sheets: [buildSourceTable("Applications", matrix, MAX_CURRENT_SOURCE_ROWS)],
       };
     }
     const workbook = await readXlsxFile(file);
     const sheets = workbook
       .filter((sheet) => sheet.data.length > 1)
-      .map((sheet) => buildSourceTable(sheet.sheet, sheet.data));
+      .map((sheet) => buildSourceTable(sheet.sheet, sheet.data, MAX_CURRENT_SOURCE_ROWS));
     if (!sheets.length) throw new Error("We could not find a worksheet with application rows.");
     return { fileName: file.name, fileSize: file.size, sheets };
   } catch (error) {

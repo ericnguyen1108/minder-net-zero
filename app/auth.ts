@@ -27,6 +27,7 @@ const SIGNING_CONTEXT = "minder-net-zero-session";
 type AuthEnv = {
   ORGANISER_ACCESS_CODE?: string;
   SESSION_SECRET?: string;
+  AUTH_STORED_PASSWORD_REQUIRED?: string;
 };
 
 function authEnv(): AuthEnv {
@@ -34,11 +35,19 @@ function authEnv(): AuthEnv {
   return {
     ORGANISER_ACCESS_CODE: process.env.ORGANISER_ACCESS_CODE,
     SESSION_SECRET: process.env.SESSION_SECRET,
+    AUTH_STORED_PASSWORD_REQUIRED: process.env.AUTH_STORED_PASSWORD_REQUIRED,
   };
+}
+
+function storedPasswordIsRequired(): boolean {
+  return authEnv().AUTH_STORED_PASSWORD_REQUIRED?.trim().toLowerCase() === "true";
 }
 
 export function authIsConfigured(): boolean {
   const env = authEnv();
+  if (storedPasswordIsRequired()) {
+    return Boolean(env.SESSION_SECRET?.trim()) && passwordStoreIsConfigured();
+  }
   return (
     Boolean(env.SESSION_SECRET?.trim()) &&
     (Boolean(env.ORGANISER_ACCESS_CODE?.trim()) || passwordStoreIsConfigured())
@@ -159,6 +168,11 @@ export async function verifyAccessCodeAndGetVersion(providedCode: string): Promi
       credentialVersion: persistent.credentialVersion,
     };
   }
+  // Once a deployment has moved to a stored password, a missing Redis record
+  // must lock the workspace instead of silently reviving the bootstrap secret.
+  if (storedPasswordIsRequired()) {
+    return { valid: false, credentialVersion: null };
+  }
   if (!env.ORGANISER_ACCESS_CODE?.trim()) return { valid: false, credentialVersion: null };
   return {
     valid: await timingSafeEqualStrings(providedCode, env.ORGANISER_ACCESS_CODE),
@@ -180,6 +194,7 @@ export async function issueSessionCookie(
     credentialVersion === undefined
       ? (await loadPasswordRecord())?.credentialVersion ?? null
       : credentialVersion;
+  if (storedPasswordIsRequired() && !activeVersion) return null;
   const expiresAtMs = nowMs + SESSION_TTL_MS;
   const token = await createSessionToken(env.SESSION_SECRET as string, expiresAtMs, activeVersion);
   const maxAgeSeconds = Math.floor(SESSION_TTL_MS / 1000);
@@ -204,6 +219,7 @@ export async function requestIsAuthorized(args: {
   const token = readCookieValue(args.cookieHeader, SESSION_COOKIE_NAME);
   try {
     const persistent = await loadPasswordRecord();
+    if (storedPasswordIsRequired() && !persistent) return false;
     return verifySessionToken(
       token,
       env.SESSION_SECRET,

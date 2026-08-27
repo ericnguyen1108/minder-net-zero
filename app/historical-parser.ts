@@ -1,8 +1,9 @@
 import Papa from "papaparse";
-import { normalizeHistoricalValue } from "./historical-data.ts";
+import { MAX_HISTORICAL_ROWS, normalizeHistoricalValue } from "./historical-data.ts";
 import type { SourceColumn, SourceTable } from "./historical-data.ts";
 
-export const MAX_HISTORICAL_ROWS = 10_000;
+export { MAX_HISTORICAL_ROWS } from "./historical-data.ts";
+export const MAX_CURRENT_SOURCE_ROWS = 10_000;
 
 function formatCell(value: unknown) {
   if (value === null || value === undefined) return "";
@@ -30,15 +31,19 @@ function uniqueHeaderLabels(rawHeaders: unknown[]) {
   });
 }
 
-export function buildSourceTable(sheetName: string, matrix: unknown[][]): SourceTable {
+export function buildSourceTable(
+  sheetName: string,
+  matrix: unknown[][],
+  maxRows = MAX_HISTORICAL_ROWS,
+): SourceTable {
   if (matrix.length < 2) throw new Error("We found headings but no application rows.");
   // Coarse guard against pathological inputs (never spread a huge array into
   // Math.max, which throws on ~100k+ elements). The exact row limit is enforced
   // below on numberedRows, AFTER blank/trailing rows are filtered — so a normal
-  // trailing newline on a full 10,000-row file is not wrongly rejected here.
-  if (matrix.length - 1 > MAX_HISTORICAL_ROWS + 1) {
+  // trailing newline on a full file is not wrongly rejected here.
+  if (matrix.length - 1 > maxRows + 1) {
     throw new Error(
-      `This preview accepts up to ${MAX_HISTORICAL_ROWS.toLocaleString()} rows in one file.`,
+      `This preview accepts up to ${maxRows.toLocaleString()} rows in one file.`,
     );
   }
   let width = 0;
@@ -63,9 +68,9 @@ export function buildSourceTable(sheetName: string, matrix: unknown[][]): Source
     }))
     .filter((row) => Object.values(row.values).some((value) => normalizeHistoricalValue(value)));
   if (numberedRows.length === 0) throw new Error("We found headings but no application rows.");
-  if (numberedRows.length > MAX_HISTORICAL_ROWS) {
+  if (numberedRows.length > maxRows) {
     throw new Error(
-      `This preview accepts up to ${MAX_HISTORICAL_ROWS.toLocaleString()} rows in one file.`,
+      `This preview accepts up to ${maxRows.toLocaleString()} rows in one file.`,
     );
   }
   return {

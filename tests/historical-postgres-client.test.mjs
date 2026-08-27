@@ -40,7 +40,7 @@ const binding = {
   sealedRows: 8,
 };
 
-test("historical save sends raw mapped rows for server-side sealing", async () => {
+test("historical save sends only mapped source columns for server-side sealing", async () => {
   const summary = { status: "ready", datasetId: binding.datasetId };
   const calls = stubPilot(() => ({
     datasetId: binding.datasetId,
@@ -49,12 +49,24 @@ test("historical save sends raw mapped rows for server-side sealing", async () =
   }));
   const table = {
     sheetName: "Applications",
-    columns: [{ key: "id", label: "ID", index: 0 }],
-    rows: [{ id: "APP-001" }],
+    columns: [
+      { key: "id", label: "ID", index: 0 },
+      { key: "answer", label: "Impact", index: 1 },
+      { key: "outcome", label: "Outcome", index: 2 },
+      { key: "unselected", label: "Unselected canary", index: 3 },
+    ],
+    rows: [
+      {
+        id: "APP-001",
+        answer: "Material climate impact evidence.",
+        outcome: "Shortlisted",
+        unselected: "MUST-NOT-LEAVE-THE-BROWSER",
+      },
+    ],
     rowNumbers: [2],
   };
   const mapping = {
-    applicationId: "id", teamName: "", responseColumns: [], outcome: "id",
+    applicationId: "id", teamName: "", responseColumns: ["answer"], outcome: "outcome",
     year: "", track: "", judgeScore: "", reviewerNotes: "",
   };
   const result = await saveHistoricalDataset({
@@ -69,7 +81,12 @@ test("historical save sends raw mapped rows for server-side sealing", async () =
   assert.equal(result.summary, summary);
   assert.equal(calls[0].action, "historical.import");
   assert.equal(calls[0].url, "/api/pilot");
-  assert.deepEqual(calls[0].payload.table, table);
+  assert.deepEqual(
+    calls[0].payload.table.columns.map((column) => column.key),
+    ["id", "answer", "outcome"],
+  );
+  assert.equal("unselected" in calls[0].payload.table.rows[0], false);
+  assert.doesNotMatch(JSON.stringify(calls[0].payload.table), /MUST-NOT-LEAVE-THE-BROWSER/);
   assert.equal(calls[0].payload.replaceDatasetId, "old-id");
   assert.equal("fingerprint" in calls[0].payload, false, "the browser cannot choose the seal");
 });

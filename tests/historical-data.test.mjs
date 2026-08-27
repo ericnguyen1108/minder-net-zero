@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  MAX_HISTORICAL_ROWS,
   createSealedHistoricalDataset,
+  historicalImportPilotRequestBytes,
   prepareHistoricalDataset,
+  prepareHistoricalDatasetForPilot,
   sanitizeHistoricalImportSummary,
 } from "../app/historical-data.ts";
-import { buildSourceTable, parseDelimitedText } from "../app/historical-parser.ts";
+import { MAX_PILOT_REQUEST_BYTES } from "../app/pilot-client.ts";
+import {
+  MAX_CURRENT_SOURCE_ROWS,
+  buildSourceTable,
+  parseDelimitedText,
+} from "../app/historical-parser.ts";
 
 const columns = [
   { key: "id", label: "Application ID", index: 0 },
@@ -81,16 +89,35 @@ test("de-duplicates headers without colliding with a real pre-existing label", (
 
 test("rejects an oversized file with a clear error instead of crashing on a huge spread", () => {
   const header = [["ID", "Answer"]];
-  const rows = Array.from({ length: 10_002 }, (_, index) => [`ID-${index}`, `Answer ${index}`]);
-  assert.throws(() => buildSourceTable("CSV", [...header, ...rows]), /accepts up to 10,000 rows/);
+  const rows = Array.from({ length: MAX_HISTORICAL_ROWS + 2 }, (_, index) => [
+    `ID-${index}`,
+    `Answer ${index}`,
+  ]);
+  assert.throws(
+    () => buildSourceTable("CSV", [...header, ...rows]),
+    /accepts up to 1,000 rows/,
+  );
 });
 
-test("accepts exactly 10,000 real rows even with a trailing blank line", () => {
+test("accepts exactly 1,000 historical rows even with a trailing blank line", () => {
   const header = [["ID", "Answer"]];
-  const rows = Array.from({ length: 10_000 }, (_, index) => [`ID-${index}`, `Answer ${index}`]);
+  const rows = Array.from({ length: MAX_HISTORICAL_ROWS }, (_, index) => [
+    `ID-${index}`,
+    `Answer ${index}`,
+  ]);
   const trailingBlank = [[""]]; // exporters commonly add a trailing newline
   const table = buildSourceTable("CSV", [...header, ...rows, ...trailingBlank]);
-  assert.equal(table.rows.length, 10_000);
+  assert.equal(table.rows.length, MAX_HISTORICAL_ROWS);
+});
+
+test("keeps the separate current-import parser capacity unchanged", () => {
+  const header = [["ID", "Answer"]];
+  const rows = Array.from({ length: MAX_CURRENT_SOURCE_ROWS }, (_, index) => [
+    `ID-${index}`,
+    `Answer ${index}`,
+  ]);
+  const table = buildSourceTable("CSV", [...header, ...rows], MAX_CURRENT_SOURCE_ROWS);
+  assert.equal(table.rows.length, MAX_CURRENT_SOURCE_ROWS);
 });
 
 test("keeps question headings, preserves leading-zero IDs and never guesses outcomes", () => {
@@ -112,6 +139,84 @@ test("keeps question headings, preserves leading-zero IDs and never guesses outc
   assert.equal(prepared.rows.at(-1).outcome, null);
   assert.ok(prepared.rows.at(-1).issues.includes("unmapped-outcome"));
   assert.equal(prepared.totalRows, prepared.validRows.length + prepared.excludedRows);
+});
+
+test("blocks oversized selected history during review instead of failing after confirmation", () => {
+  const rows = makeRows(75, 75).map((row, index) => ({
+    ...row,
+    problem: `${index}: ${"P".repeat(28_000)}`,
+  }));
+  const input = {
+    table: makeTable(rows),
+    mapping,
+    outcomeMapping,
+    fileName: "large-history.csv",
+    fileSize: 4_300_000,
+    guideVersion: 1,
+  };
+  assert.equal(prepareHistoricalDataset(input.table, mapping, outcomeMapping).canSeal, true);
+  assert.ok(historicalImportPilotRequestBytes(input) > MAX_PILOT_REQUEST_BYTES);
+  const prepared = prepareHistoricalDatasetForPilot(input);
+  assert.equal(prepared.canSeal, false);
+  assert.match(prepared.sealBlockers.join(" "), /too large for this pilot/i);
+});
+
+test("historical sealing rejects Phase 4-incompatible headings and answer sizes", () => {
+  const sensitiveTable = makeTable(makeRows(10, 10));
+  sensitiveTable.columns = sensitiveTable.columns.map((column) =>
+    column.key === "problem" ? { ...column, label: "Gender" } : column,
+  );
+  const sensitive = prepareHistoricalDataset(sensitiveTable, mapping, outcomeMapping);
+  assert.equal(sensitive.canSeal, false);
+  assert.match(sensitive.sealBlockers.join(" "), /identity, contact, outcome, reviewer or score/i);
+
+  const answerColumns = Array.from({ length: 41 }, (_, index) => ({
+    key: `answer-${index}`,
+    label: `Application answer ${index + 1}`,
+    index: index + 4,
+  }));
+  const manyRows = makeRows(10, 10).map((row, rowIndex) => ({
+    ...row,
+    ...Object.fromEntries(
+      answerColumns.map((column) => [column.key, `Answer ${rowIndex}-${column.index}`]),
+    ),
+  }));
+  const manyTable = makeTable(manyRows);
+  manyTable.columns = [...manyTable.columns, ...answerColumns];
+  const tooMany = prepareHistoricalDataset(
+    manyTable,
+    { ...mapping, responseColumns: answerColumns.map((column) => column.key) },
+    outcomeMapping,
+  );
+  assert.equal(tooMany.canSeal, false);
+  assert.match(tooMany.sealBlockers.join(" "), /no more than 40/i);
+
+  const longAnswerRows = makeRows(10, 10);
+  longAnswerRows[0].problem = "P".repeat(30_001);
+  const longAnswer = prepareHistoricalDataset(
+    makeTable(longAnswerRows),
+    mapping,
+    outcomeMapping,
+  );
+  assert.equal(longAnswer.canSeal, false);
+  assert.equal(longAnswer.issueCounts["answer-too-long"], 1);
+
+  const longApplicationRows = makeRows(10, 10).map((row) => ({ ...row, delivery: "Delivery" }));
+  longApplicationRows[0].problem = "P".repeat(24_000);
+  longApplicationRows[0].solution = "S".repeat(24_000);
+  longApplicationRows[0].delivery = "D".repeat(24_000);
+  const longApplicationTable = makeTable(longApplicationRows);
+  longApplicationTable.columns = [
+    ...longApplicationTable.columns,
+    { key: "delivery", label: "Delivery plan", index: 6 },
+  ];
+  const longApplication = prepareHistoricalDataset(
+    longApplicationTable,
+    { ...mapping, responseColumns: ["problem", "solution", "delivery"] },
+    outcomeMapping,
+  );
+  assert.equal(longApplication.canSeal, false);
+  assert.equal(longApplication.issueCounts["application-too-long"], 1);
 });
 
 test("shows missing, ignored, exact duplicate and conflicting records as excluded", () => {

@@ -1,8 +1,16 @@
-import { historicalMatchKey, normalizeHistoricalValue } from "./historical-data.ts";
+import {
+  historicalMatchKey,
+  normalizeHistoricalValue,
+  projectSourceTable,
+} from "./historical-data.ts";
 import { isSensitiveAssessmentHeading } from "./assessment-safety.ts";
 export { isSensitiveAssessmentHeading } from "./assessment-safety.ts";
 import type { SourceTable } from "./historical-data.ts";
-import { pilot } from "./pilot-client.ts";
+import {
+  MAX_PILOT_REQUEST_BYTES,
+  pilot,
+  pilotRequestByteLength,
+} from "./pilot-client.ts";
 
 export const MAX_CURRENT_ANSWER_COLUMNS = 40;
 export const MAX_CURRENT_ANSWER_CHARS = 30_000;
@@ -628,19 +636,52 @@ export type CurrentDatasetSave = {
   replaceDatasetId?: string | null;
 };
 
+function currentImportPayload(input: CurrentDatasetSave) {
+  return {
+    fileName: input.fileName,
+    fileSize: input.fileSize,
+    table: projectSourceTable(input.table, [
+      input.mapping.applicationId,
+      input.mapping.teamName,
+      input.mapping.track,
+      ...input.mapping.responseColumns,
+    ]),
+    mapping: input.mapping,
+    replaceDatasetId: input.replaceDatasetId ?? null,
+  };
+}
+
+export function currentImportPilotRequestBytes(input: CurrentDatasetSave) {
+  return pilotRequestByteLength("current.import", currentImportPayload(input));
+}
+
+export function prepareCurrentDatasetForPilot(
+  input: CurrentDatasetSave,
+): PreparedCurrentDataset {
+  const prepared = prepareCurrentDataset(input.table, input.mapping);
+  if (
+    !prepared.canSeal ||
+    currentImportPilotRequestBytes(input) <= MAX_PILOT_REQUEST_BYTES
+  ) {
+    return prepared;
+  }
+  return {
+    ...prepared,
+    canSeal: false,
+    sealBlockers: [
+      ...prepared.sealBlockers,
+      "The selected application data is too large for this pilot. Select fewer answer columns or shorten long answers, then check the rows again.",
+    ],
+  };
+}
+
 /** The API re-prepares, hashes and seals the raw current-applications import. */
 export async function saveCurrentDataset(input: CurrentDatasetSave) {
   return pilot<{
     datasetId: string;
     fingerprint: string;
     summary: CurrentImportSummary;
-  }>("current.import", {
-    fileName: input.fileName,
-    fileSize: input.fileSize,
-    table: input.table,
-    mapping: input.mapping,
-    replaceDatasetId: input.replaceDatasetId ?? null,
-  });
+  }>("current.import", currentImportPayload(input));
 }
 
 export async function currentDatasetExists(datasetId: string) {

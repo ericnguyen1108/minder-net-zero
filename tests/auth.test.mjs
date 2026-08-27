@@ -24,10 +24,12 @@ function withAuthEnv(run) {
   const previousSecret = process.env.SESSION_SECRET;
   const previousStoreUrl = process.env.AUTH_KV_REST_API_URL;
   const previousStoreToken = process.env.AUTH_KV_REST_API_TOKEN;
+  const previousStoredPasswordRequired = process.env.AUTH_STORED_PASSWORD_REQUIRED;
   process.env.ORGANISER_ACCESS_CODE = "correct-horse-battery";
   process.env.SESSION_SECRET = SECRET;
   delete process.env.AUTH_KV_REST_API_URL;
   delete process.env.AUTH_KV_REST_API_TOKEN;
+  delete process.env.AUTH_STORED_PASSWORD_REQUIRED;
   delete process.env.AUTH_MODE;
   return Promise.resolve()
     .then(run)
@@ -40,6 +42,8 @@ function withAuthEnv(run) {
       else process.env.AUTH_KV_REST_API_URL = previousStoreUrl;
       if (previousStoreToken === undefined) delete process.env.AUTH_KV_REST_API_TOKEN;
       else process.env.AUTH_KV_REST_API_TOKEN = previousStoreToken;
+      if (previousStoredPasswordRequired === undefined) delete process.env.AUTH_STORED_PASSWORD_REQUIRED;
+      else process.env.AUTH_STORED_PASSWORD_REQUIRED = previousStoredPasswordRequired;
       if (previousAuthMode === undefined) delete process.env.AUTH_MODE;
       else process.env.AUTH_MODE = previousAuthMode;
     });
@@ -170,6 +174,7 @@ test("changing the password replaces the bootstrap password and invalidates old 
     let storedValue = null;
     globalThis.fetch = async (_url, init) => {
       assert.equal(init?.headers?.authorization, "Bearer test-store-token");
+      assert.ok(init?.signal instanceof AbortSignal);
       const command = JSON.parse(String(init?.body));
       if (command[0] === "GET") return Response.json({ result: storedValue });
       if (command[0] === "SET") {
@@ -256,6 +261,61 @@ test("changing the password replaces the bootstrap password and invalidates old 
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+test("a required stored password fails closed if its Redis record disappears", async () => {
+  await withAuthEnv(async () => {
+    process.env.AUTH_KV_REST_API_URL = "https://auth-store.example";
+    process.env.AUTH_KV_REST_API_TOKEN = "test-store-token";
+    process.env.AUTH_STORED_PASSWORD_REQUIRED = "true";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ result: null });
+    try {
+      const bootstrapLogin = await authPost(
+        new Request("https://minder.example/api/auth", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accessCode: "correct-horse-battery" }),
+        }),
+      );
+      assert.equal(bootstrapLogin.status, 401);
+
+      const oldBootstrapToken = await createSessionToken(SECRET, Date.now() + 60_000);
+      assert.equal(
+        await requestIsAuthorized({
+          hostHeader: "minder.example",
+          cookieHeader: `${SESSION_COOKIE_NAME}=${oldBootstrapToken}`,
+        }),
+        false,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("a required stored password fails closed if its Redis configuration disappears", async () => {
+  await withAuthEnv(async () => {
+    process.env.AUTH_STORED_PASSWORD_REQUIRED = "true";
+    const bootstrapLogin = await authPost(
+      new Request("https://minder.example/api/auth", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accessCode: "correct-horse-battery" }),
+      }),
+    );
+    assert.equal(bootstrapLogin.status, 503);
+    assert.equal((await bootstrapLogin.json()).error.code, "auth_not_configured");
+
+    const oldBootstrapToken = await createSessionToken(SECRET, Date.now() + 60_000);
+    assert.equal(
+      await requestIsAuthorized({
+        hostHeader: "minder.example",
+        cookieHeader: `${SESSION_COOKIE_NAME}=${oldBootstrapToken}`,
+      }),
+      false,
+    );
   });
 });
 

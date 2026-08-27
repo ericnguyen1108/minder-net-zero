@@ -4452,6 +4452,28 @@ select:focus-visible {
   margin-top: 16px;
 }
 
+.approval-checkbox {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+}
+
+.approval-checkbox > span {
+  display: grid;
+  gap: 3px;
+}
+
+.approval-checkbox strong,
+.approval-checkbox small {
+  display: block;
+}
+
+.approval-checkbox small {
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
 .history-ready-card {
   border: 1px solid rgba(59, 255, 160, 0.28);
   background: linear-gradient(145deg, rgba(15, 48, 35, 0.58), rgba(12, 16, 23, 0.95));

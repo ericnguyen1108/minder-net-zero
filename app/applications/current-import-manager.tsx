@@ -122,11 +122,30 @@ export default function CurrentImportManager() {
     [mapping, table],
   );
 
+  function resetConfirmations() {
+    setWarningsConfirmed(false);
+    setPrivacyConfirmed(false);
+    setCompleteConfirmed(false);
+  }
+
+  function resetPublishedResult() {
+    resetConfirmations();
+    setProgress(0);
+    setDatasetId(null);
+    setMessage("");
+    setState("ready");
+  }
+
   async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     setState("reading");
     setMessage("");
+    setWorkbook(null);
+    setSheetIndex(0);
+    setMapping(EMPTY_MAPPING);
+    resetConfirmations();
+    setProgress(0);
     setDatasetId(null);
     try {
       const parsed = await parseWorkbookFile(file);
@@ -136,9 +155,6 @@ export default function CurrentImportManager() {
       setWorkbook(parsed);
       setSheetIndex(0);
       setMapping(suggestMapping(parsed.sheets[0]));
-      setWarningsConfirmed(false);
-      setPrivacyConfirmed(false);
-      setCompleteConfirmed(false);
       setState("ready");
     } catch (error) {
       setState("error");
@@ -149,14 +165,26 @@ export default function CurrentImportManager() {
   }
 
   function chooseSheet(index: number) {
+    if (state === "uploading") return;
     setSheetIndex(index);
     setMapping(suggestMapping(workbook!.sheets[index]));
-    setWarningsConfirmed(false);
-    setCompleteConfirmed(false);
+    resetPublishedResult();
+  }
+
+  function chooseCompetition(value: string) {
+    if (state === "uploading" || value === competitionId) return;
+    setCompetitionId(value);
+    resetPublishedResult();
+  }
+
+  function updateMapping(update: (current: CurrentColumnMapping) => CurrentColumnMapping) {
+    if (state === "uploading") return;
+    setMapping(update);
+    resetPublishedResult();
   }
 
   function toggleResponse(key: string) {
-    setMapping((current) => ({
+    updateMapping((current) => ({
       ...current,
       responseColumns: current.responseColumns.includes(key)
         ? current.responseColumns.filter((item) => item !== key)
@@ -275,21 +303,21 @@ export default function CurrentImportManager() {
       <section className="platform-card import-control-card">
         <div className="import-step"><b>1</b><div><strong>Choose the complete spreadsheet</strong><p>Excel, CSV or TSV · one row per team · maximum {MAX_CURRENT_IMPORT_ROWS.toLocaleString()} applications</p></div></div>
         <div className="import-top-grid">
-          <label>Competition<select value={competitionId} onChange={(event) => setCompetitionId(event.target.value)}>{competitions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label>Competition<select value={competitionId} disabled={state === "reading" || state === "uploading"} onChange={(event) => chooseCompetition(event.target.value)}>{competitions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <label className="central-file-picker"><input type="file" accept=".xlsx,.csv,.tsv,text/csv,text/tab-separated-values" onChange={(event) => void chooseFile(event)} disabled={state === "reading" || state === "uploading"} /><span>{state === "reading" ? "Checking file…" : workbook ? "Choose a different file" : "Choose spreadsheet"}</span></label>
         </div>
-        {workbook ? <div className="central-file-summary"><strong>{workbook.fileName}</strong><span>{formatImportFileSize(workbook.fileSize)} · {table?.rows.length.toLocaleString()} rows</span>{workbook.sheets.length > 1 ? <label>Worksheet<select value={sheetIndex} onChange={(event) => chooseSheet(Number(event.target.value))}>{workbook.sheets.map((sheet, index) => <option key={sheet.sheetName} value={index}>{sheet.sheetName}</option>)}</select></label> : null}</div> : null}
+        {workbook ? <div className="central-file-summary"><strong>{workbook.fileName}</strong><span>{formatImportFileSize(workbook.fileSize)} · {table?.rows.length.toLocaleString()} rows</span>{workbook.sheets.length > 1 ? <label>Worksheet<select value={sheetIndex} disabled={state === "uploading"} onChange={(event) => chooseSheet(Number(event.target.value))}>{workbook.sheets.map((sheet, index) => <option key={sheet.sheetName} value={index}>{sheet.sheetName}</option>)}</select></label> : null}</div> : null}
       </section>
 
       {table ? (
         <section className="platform-card import-control-card">
           <div className="import-step"><b>2</b><div><strong>Tell Minder what each column means</strong><p>Identity stays separate. Only checked answer columns may be used for assessment.</p></div></div>
           <div className="import-mapping-grid">
-            <ColumnSelect label="Stable application ID" value={mapping.applicationId} table={table} required onChange={(value) => setMapping((current) => ({ ...current, applicationId: value }))} />
-            <ColumnSelect label="Team name" value={mapping.teamName} table={table} onChange={(value) => setMapping((current) => ({ ...current, teamName: value }))} />
-            <ColumnSelect label="Track or category" value={mapping.track} table={table} onChange={(value) => setMapping((current) => ({ ...current, track: value }))} />
+            <ColumnSelect label="Stable application ID" value={mapping.applicationId} table={table} required disabled={state === "uploading"} onChange={(value) => updateMapping((current) => ({ ...current, applicationId: value }))} />
+            <ColumnSelect label="Team name" value={mapping.teamName} table={table} disabled={state === "uploading"} onChange={(value) => updateMapping((current) => ({ ...current, teamName: value }))} />
+            <ColumnSelect label="Track or category" value={mapping.track} table={table} disabled={state === "uploading"} onChange={(value) => updateMapping((current) => ({ ...current, track: value }))} />
           </div>
-          <fieldset className="central-response-picker"><legend>Application answers AI and reviewers may assess</legend>{table.columns.map((column) => { const sensitive = isSensitiveAssessmentHeading(column.label); const identity = selectedIdentityKeys.has(column.key); return <label className={sensitive ? "blocked" : ""} key={column.key}><input type="checkbox" checked={mapping.responseColumns.includes(column.key)} disabled={sensitive || identity} onChange={() => toggleResponse(column.key)} /><span><strong>{column.label}</strong><small>{sensitive ? "Blocked: identity, contact, outcome or reviewer field" : identity ? "Stored as identity, not assessment text" : "Include only if judges are allowed to assess this answer"}</small></span></label>; })}</fieldset>
+          <fieldset className="central-response-picker" disabled={state === "uploading"}><legend>Application answers AI and reviewers may assess</legend>{table.columns.map((column) => { const sensitive = isSensitiveAssessmentHeading(column.label); const identity = selectedIdentityKeys.has(column.key); return <label className={sensitive ? "blocked" : ""} key={column.key}><input type="checkbox" checked={mapping.responseColumns.includes(column.key)} disabled={sensitive || identity} onChange={() => toggleResponse(column.key)} /><span><strong>{column.label}</strong><small>{sensitive ? "Blocked: identity, contact, outcome or reviewer field" : identity ? "Stored as identity, not assessment text" : "Include only if judges are allowed to assess this answer"}</small></span></label>; })}</fieldset>
         </section>
       ) : null}
 
@@ -305,7 +333,7 @@ export default function CurrentImportManager() {
           </div>
           {state === "uploading" ? <div className="import-progress" role="status"><span style={{ width: `${progress}%` }} /><strong>{progress}% safely published</strong></div> : null}
           {message ? <p className={state === "error" ? "platform-error" : "platform-success"} role="status">{message}</p> : null}
-          <div className="import-publish-row"><p>Successful imports are centrally shared, encrypted by the managed database, revisioned and audited. Raw staging rows are removed after publish.</p><button className="platform-primary" type="button" disabled={!readyToPublish || state === "uploading" || state === "complete"} onClick={() => void publish()}>{state === "uploading" ? "Publishing complete cohort…" : state === "complete" ? "Published" : "Publish to shared workspace"}</button></div>
+          <div className="import-publish-row"><p>Check carefully before publishing: this pilot supports one current cohort per competition. Successful imports are centrally shared, revisioned and audited; raw staging rows are removed after publish.</p><button className="platform-primary" type="button" disabled={!readyToPublish || state === "uploading" || state === "complete"} onClick={() => void publish()}>{state === "uploading" ? "Publishing complete cohort…" : state === "complete" ? "Published" : "Publish to shared workspace"}</button></div>
           {datasetId ? <div className="import-next"><strong>Applications are ready for assignment.</strong><Link href="/admin/assignments">Assign reviewers →</Link></div> : null}
         </section>
       ) : null}
@@ -313,6 +341,6 @@ export default function CurrentImportManager() {
   );
 }
 
-function ColumnSelect({ label, value, table, required = false, onChange }: { label: string; value: string; table: SourceTable; required?: boolean; onChange: (value: string) => void }) {
-  return <label>{label}<select value={value} onChange={(event) => onChange(event.target.value)} required={required}><option value="">{required ? "Choose a column" : "Not included"}</option>{table.columns.map((column) => <option key={column.key} value={column.key}>{column.label}</option>)}</select></label>;
+function ColumnSelect({ label, value, table, required = false, disabled = false, onChange }: { label: string; value: string; table: SourceTable; required?: boolean; disabled?: boolean; onChange: (value: string) => void }) {
+  return <label>{label}<select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} required={required}><option value="">{required ? "Choose a column" : "Not included"}</option>{table.columns.map((column) => <option key={column.key} value={column.key}>{column.label}</option>)}</select></label>;
 }

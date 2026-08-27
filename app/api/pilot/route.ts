@@ -34,6 +34,48 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 const CONFLICT_ERRORS = new Set(["revision_conflict", "already_revealed", "stale_lease", "unknown_batch"]);
+const DATABASE_CONNECTION_ERRORS = new Set([
+  "CONNECT_TIMEOUT",
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "PILOT_DATABASE_NOT_CONFIGURED",
+]);
+
+/** PostgreSQL and its driver attach structured fields that domain errors do not. */
+export function isDatabaseShapedError(error: unknown): boolean {
+  if (!isObject(error)) return false;
+  const name = typeof error.name === "string" ? error.name : "";
+  const code = typeof error.code === "string" ? error.code.toUpperCase() : "";
+  if (name === "PostgresError" || /^[0-9A-Z]{5}$/.test(code)) return true;
+  if (DATABASE_CONNECTION_ERRORS.has(code) || code.startsWith("CONNECTION_")) return true;
+  return ["severity", "routine", "schema_name", "table_name", "constraint_name"].some(
+    (field) => typeof error[field] === "string",
+  );
+}
+
+export function pilotActionErrorResponse(error: unknown): Response {
+  const message = error instanceof Error ? error.message : "The action failed.";
+  if (CONFLICT_ERRORS.has(message)) return json({ error: { code: message } }, 409);
+  if (isDatabaseShapedError(error)) {
+    return json(
+      {
+        error: {
+          code: "pilot_store_unavailable",
+          message: "The workspace data store is temporarily unavailable. Keep this tab open and try again.",
+        },
+      },
+      503,
+    );
+  }
+  return json({ error: { code: "action_failed", message } }, 400);
+}
 
 // The client speaks shortlist/reject/waitlist; the DB CHECK speaks the -ed forms
 // plus `undecided` (a cleared decision, recorded rather than deleted so the
@@ -78,9 +120,7 @@ export async function POST(request: Request): Promise<Response> {
     if (data === undefined) return json({ error: { code: "unknown_action", message: action } }, 400);
     return json({ ok: true, data });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "The action failed.";
-    if (CONFLICT_ERRORS.has(message)) return json({ error: { code: message } }, 409);
-    return json({ error: { code: "action_failed", message } }, 400);
+    return pilotActionErrorResponse(error);
   }
 }
 

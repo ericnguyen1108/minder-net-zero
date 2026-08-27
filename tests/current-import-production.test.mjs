@@ -120,6 +120,9 @@ test("production import routes are server-authorized, transactional and centrall
     assert.doesNotMatch(route, /localStorage|indexedDB|historical-data|current-data/);
   }
   assert.match(repository, /pg_advisory_xact_lock/);
+  assert.match(repository, /current-cohort/);
+  assert.match(repository, /inArray\(datasets\.status, \["ready", "locked"\]\)/);
+  assert.match(repository, /dataset\.sourceHash !== source\.sourceHash/);
   assert.match(repository, /currentImportSourceHash/);
   assert.match(repository, /duplicate_external_ref/);
   assert.match(repository, /transaction\.insert\(applicantIdentities\)/);
@@ -127,6 +130,20 @@ test("production import routes are server-authorized, transactional and centrall
   assert.match(migration, /ENABLE ROW LEVEL SECURITY/);
   assert.match(migration, /FORCE ROW LEVEL SECURITY/);
   assert.match(migration, /app_current_tenant_id/);
+});
+
+test("the production import screen cannot reuse stale confirmations or mutate an active upload", async () => {
+  const manager = await readFile(
+    new URL("../app/applications/current-import-manager.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    manager,
+    /function resetPublishedResult\(\)[\s\S]*setDatasetId\(null\)[\s\S]*setMessage\(""\)[\s\S]*setState\("ready"\)/,
+  );
+  assert.match(manager, /if \(state === "uploading"\) return;/);
+  assert.match(manager, /disabled=\{state === "reading" \|\| state === "uploading"\}/);
+  assert.match(manager, /central-response-picker" disabled=\{state === "uploading"\}/);
 });
 
 test("audit metadata contains identifiers, counts and hashes but no candidate payload", async () => {

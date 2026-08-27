@@ -1,6 +1,9 @@
 export const SENSITIVE_ASSESSMENT_HEADING_PATTERNS = [
-  "\\b(?:e\\s*mail|phone|mobile|address|passport|national\\s+id|social\\s+security|tax\\s+id|date\\s+of\\s+birth|dob|bank|account\\s+number)\\b",
-  "\\bcontact(?:\\s+(?:name|number|details?|person))?\\b",
+  "^(?:(?:primary|secondary|main|alternate|applicant|founder|team|organisation|organization|company|emergency|billing|registered|postal|mailing|home|work)\\s+)?(?:contact\\s+)?(?:e\\s*mail(?:\\s+address)?|phone(?:\\s+number)?|mobile(?:\\s+number)?|address)$",
+  "^(?:e\\s*mail(?:\\s+address)?|phone(?:\\s+number)?|mobile(?:\\s+number)?)(?:\\s+(?:of|for)\\s+(?:primary|secondary|main|alternate|applicant|founder|team(?:\\s+lead)?|organisation|organization|company|emergency|billing)(?:\\s+(?:contact|lead|representative|person))?)?$",
+  "^(?:(?:registered|office|postal|mailing|home|work|business|residential|correspondence|company|organisation|organization)\\s+)?address(?:\\s+line\\s+\\d+)?$",
+  "^(?:(?:primary|secondary|main|alternate|applicant|founder|team|organisation|organization|company|emergency)\\s+)?contact(?:\\s+(?:name|number|details?|person|e\\s*mail|address))?$",
+  "\\b(?:passport|national\\s+id|social\\s+security|tax\\s+id|date\\s+of\\s+birth|dob|bank\\s+account|account\\s+number)\\b",
   "\\b(?:first|last|full|applicant|founder|member|reviewer|judge)\\s+name\\b",
   "\\bteam\\s+member\\s+names?\\b",
   "\\b(?:gender|sex|race|ethnicity|age|disability|religion|marital\\s+status|sexual\\s+orientation)\\b",
