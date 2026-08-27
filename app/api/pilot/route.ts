@@ -14,6 +14,7 @@ import { requestIsAuthorized } from "../../auth.ts";
 import { createSealedHistoricalDataset, prepareHistoricalDataset } from "../../historical-data.ts";
 import { createCurrentDataset } from "../../current-data.ts";
 import { createPhase4InputFingerprint } from "../../phase4-logic.ts";
+import { optionalDatabaseUuid } from "./input.ts";
 import * as marking from "../../../db/pilot/marking-repository.ts";
 import * as importRepo from "../../../db/pilot/import-repository.ts";
 import * as cal from "../../../db/pilot/calibration-repository.ts";
@@ -172,7 +173,11 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       });
       // saveHistoricalDataset returns { datasetId, fingerprint, summary } with
       // the summary's datasetId reconciled to the DB id.
-      return importRepo.saveHistoricalDataset(wsId, sealed, (p.replaceDatasetId as string | null) ?? null);
+      return importRepo.saveHistoricalDataset(
+        wsId,
+        sealed,
+        optionalDatabaseUuid(p.replaceDatasetId),
+      );
     }
     case "historical.teaching":
       return importRepo.loadTeachingRows(String(p.datasetId));
@@ -200,7 +205,7 @@ async function dispatch(action: string, p: Record<string, unknown>, wsId: string
       return importRepo.saveCurrentDataset(
         wsId,
         sealed,
-        (p.replaceDatasetId as string | null) ?? null,
+        optionalDatabaseUuid(p.replaceDatasetId),
       );
     }
     case "current.aiCases":
