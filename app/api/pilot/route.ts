@@ -77,6 +77,17 @@ export function pilotActionErrorResponse(error: unknown): Response {
   return json({ error: { code: "action_failed", message } }, 400);
 }
 
+/** Log only diagnostic classifications, never the database message or request data. */
+export function reportPilotActionError(action: string, error: unknown): void {
+  if (!isDatabaseShapedError(error)) return;
+  const record = isObject(error) ? error : {};
+  console.error("pilot_action_database_error", {
+    action,
+    errorName: typeof record.name === "string" ? record.name : "unknown",
+    errorCode: typeof record.code === "string" ? record.code : "unknown",
+  });
+}
+
 // The client speaks shortlist/reject/waitlist; the DB CHECK speaks the -ed forms
 // plus `undecided` (a cleared decision, recorded rather than deleted so the
 // append-only final_decision_events journal captures it).
@@ -120,6 +131,7 @@ export async function POST(request: Request): Promise<Response> {
     if (data === undefined) return json({ error: { code: "unknown_action", message: action } }, 400);
     return json({ ok: true, data });
   } catch (error) {
+    reportPilotActionError(action, error);
     return pilotActionErrorResponse(error);
   }
 }

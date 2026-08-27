@@ -90,6 +90,22 @@ if (!url) {
     assert.equal(a.fingerprint, b.fingerprint);
   });
 
+  test("retrying the same historical import reuses the committed dataset", async () => {
+    const wsId = await freshWorkspace();
+    const rows = makeRows(30, 30);
+    const t = table(rows);
+    const prepared = prepareHistoricalDataset(t, mapping, outcomeMapping);
+    const seal = () => createSealedHistoricalDataset({
+      datasetId: "retry", fileName: "retry.csv", fileSize: 1, table: t,
+      guideVersion: 1, mapping, outcomeMapping, prepared,
+    });
+    const first = await importRepo.saveHistoricalDataset(wsId, await seal());
+    const retry = await importRepo.saveHistoricalDataset(wsId, await seal());
+    assert.equal(retry.datasetId, first.datasetId);
+    assert.equal(retry.fingerprint, first.fingerprint);
+    assert.equal(retry.summary.datasetId, first.datasetId);
+  });
+
   test("freezes current applications with identity kept separate from answers", async () => {
     const wsId = await freshWorkspace();
     const cases = [

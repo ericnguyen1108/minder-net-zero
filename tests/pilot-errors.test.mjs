@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isDatabaseShapedError,
   pilotActionErrorResponse,
+  reportPilotActionError,
 } from "../app/api/pilot/route.ts";
 
 test("database errors become a generic 503 without leaking PostgreSQL details", async () => {
@@ -56,4 +57,23 @@ test("safe domain validation and conflict responses keep their existing behavior
   const conflict = pilotActionErrorResponse(new Error("revision_conflict"));
   assert.equal(conflict.status, 409);
   assert.deepEqual(await conflict.json(), { error: { code: "revision_conflict" } });
+});
+
+test("database diagnostics contain classifications but never messages or request data", () => {
+  const original = console.error;
+  const calls = [];
+  console.error = (...args) => calls.push(args);
+  try {
+    reportPilotActionError("historical.import", Object.assign(
+      new Error("duplicate private applicant data"),
+      { name: "PostgresError", code: "23505", detail: "private applicant data" },
+    ));
+  } finally {
+    console.error = original;
+  }
+  assert.deepEqual(calls, [[
+    "pilot_action_database_error",
+    { action: "historical.import", errorName: "PostgresError", errorCode: "23505" },
+  ]]);
+  assert.doesNotMatch(JSON.stringify(calls), /private applicant data|duplicate/);
 });

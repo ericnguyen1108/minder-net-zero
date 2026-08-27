@@ -81,6 +81,42 @@ export async function saveHistoricalDataset(
         DELETE FROM netzero.historical_datasets
          WHERE id = ${replaceDatasetId} AND workspace_id = ${workspaceId}`;
     }
+
+    // A browser retry can arrive after the first request committed but before
+    // its response reached the page. The fingerprint is unique per workspace,
+    // so inserting again would otherwise turn a successful first save into a
+    // permanent 23505 loop. Reuse the complete, transactionally-created dataset
+    // when the server-derived seal still matches.
+    const [existing] = await tx<{
+      id: string;
+      integrityHash: string;
+      teachingCount: number;
+      sealedCount: number;
+    }[]>`
+      SELECT id, integrity_hash AS "integrityHash",
+             teaching_count AS "teachingCount", sealed_count AS "sealedCount"
+        FROM netzero.historical_datasets
+       WHERE workspace_id = ${workspaceId} AND fingerprint = ${md.datasetFingerprint}`;
+    if (existing) {
+      if (
+        existing.integrityHash !== md.split.integrityHash ||
+        existing.teachingCount !== sealed.teachingRows.length ||
+        existing.sealedCount !== sealed.sealedRows.length
+      ) {
+        throw new Error("This historical file conflicts with an earlier sealed import.");
+      }
+      const summary: HistoricalImportSummary = { ...md.summary, datasetId: existing.id };
+      await tx`
+        UPDATE netzero.historical_datasets SET active = false
+         WHERE workspace_id = ${workspaceId} AND active AND id <> ${existing.id}`;
+      await tx`
+        UPDATE netzero.historical_datasets
+           SET name = ${md.sourceName ?? "history"}, file_name = ${md.sourceName ?? null},
+               summary = ${tx.json(summary)}, guide_version = ${md.guideVersion}, active = true
+         WHERE id = ${existing.id}`;
+      return { datasetId: existing.id, fingerprint: md.datasetFingerprint, summary };
+    }
+
     // Only one active historical dataset per workspace.
     await tx`
       UPDATE netzero.historical_datasets SET active = false
