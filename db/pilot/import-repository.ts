@@ -44,6 +44,18 @@ export type CurrentCaseInput = {
   identity: Record<string, unknown>;
 };
 
+// Keep each statement comfortably below PostgreSQL's parameter limit while
+// avoiding one network round trip per imported application.
+const IMPORT_INSERT_BATCH_SIZE = 100;
+
+export function importBatches<T>(rows: readonly T[]): T[][] {
+  const batches: T[][] = [];
+  for (let offset = 0; offset < rows.length; offset += IMPORT_INSERT_BATCH_SIZE) {
+    batches.push(rows.slice(offset, offset + IMPORT_INSERT_BATCH_SIZE));
+  }
+  return batches;
+}
+
 // ----------------------------------------------------------- historical ---
 
 /**
@@ -86,12 +98,26 @@ export async function saveHistoricalDataset(
     await tx`
       UPDATE netzero.historical_datasets SET summary = ${tx.json(summary)}
        WHERE id = ${dataset.id}`;
-    for (const row of rows) {
+    for (const batch of importBatches(rows)) {
       await tx`
         INSERT INTO netzero.historical_rows
           (dataset_id, row_id, partition, answers, outcome, row_fingerprint)
-        VALUES (${dataset.id}, ${row.rowId}, ${row.partition},
-                ${tx.json(row.answers)}, ${row.outcome}, ${row.rowId})`;
+        ${tx(
+          batch.map((row) => ({
+            dataset_id: dataset.id,
+            row_id: row.rowId,
+            partition: row.partition,
+            answers: tx.json(row.answers),
+            outcome: row.outcome,
+            row_fingerprint: row.rowId,
+          })),
+          "dataset_id",
+          "row_id",
+          "partition",
+          "answers",
+          "outcome",
+          "row_fingerprint",
+        )}`;
     }
     return { datasetId: dataset.id, fingerprint: md.datasetFingerprint, summary };
   });
@@ -248,17 +274,36 @@ export async function saveCurrentDataset(
       VALUES (${md.id}, ${workspaceId}, ${md.sourceName}, ${md.datasetFingerprint},
               ${md.integrityHash}, ${sealed.cases.length}, ${tx.json(md as never)},
               true, ${md.importedAt})`;
-    for (const currentCase of sealed.cases) {
+    for (const batch of importBatches(sealed.cases)) {
       await tx`
         INSERT INTO netzero.current_cases
           (dataset_id, row_id, answers, content_hash)
-        VALUES (${md.id}, ${currentCase.rowId}, ${tx.json(currentCase.answers as never)},
-                ${currentCase.contentHash})`;
+        ${tx(
+          batch.map((currentCase) => ({
+            dataset_id: md.id,
+            row_id: currentCase.rowId,
+            answers: tx.json(currentCase.answers as never),
+            content_hash: currentCase.contentHash,
+          })),
+          "dataset_id",
+          "row_id",
+          "answers",
+          "content_hash",
+        )}`;
     }
-    for (const identity of sealed.identities) {
+    for (const batch of importBatches(sealed.identities)) {
       await tx`
         INSERT INTO netzero.current_identities (dataset_id, row_id, identity)
-        VALUES (${md.id}, ${identity.rowId}, ${tx.json(identity as never)})`;
+        ${tx(
+          batch.map((identity) => ({
+            dataset_id: md.id,
+            row_id: identity.rowId,
+            identity: tx.json(identity as never),
+          })),
+          "dataset_id",
+          "row_id",
+          "identity",
+        )}`;
     }
     return {
       datasetId: md.id,
