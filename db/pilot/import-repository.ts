@@ -137,7 +137,6 @@ export async function saveHistoricalDataset(
     for (const batch of importBatches(rows)) {
       await tx`
         INSERT INTO netzero.historical_rows
-          (dataset_id, row_id, partition, answers, outcome, row_fingerprint)
         ${tx(
           batch.map((row) => ({
             dataset_id: dataset.id,
@@ -313,7 +312,6 @@ export async function saveCurrentDataset(
     for (const batch of importBatches(sealed.cases)) {
       await tx`
         INSERT INTO netzero.current_cases
-          (dataset_id, row_id, answers, content_hash)
         ${tx(
           batch.map((currentCase) => ({
             dataset_id: md.id,
@@ -329,7 +327,7 @@ export async function saveCurrentDataset(
     }
     for (const batch of importBatches(sealed.identities)) {
       await tx`
-        INSERT INTO netzero.current_identities (dataset_id, row_id, identity)
+        INSERT INTO netzero.current_identities
         ${tx(
           batch.map((identity) => ({
             dataset_id: md.id,
